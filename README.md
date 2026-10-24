@@ -5,9 +5,10 @@ nouveau dépôt ; Cruft conserve le lien pour les mises à jour futures.
 
 ```bash
 uv tool install cruft
-cruft create <URL-ou-chemin-Git-du-template>
+cd ~/projects
+cruft create ~/python-project-template  # ou l'URL Git du template
 cd my-python-project
-make setup
+make init
 make shell
 make check
 ```
@@ -28,12 +29,38 @@ Les composants désactivés sont retirés, ainsi que leurs groupes et cibles Mak
 Développer le template :
 
 ```bash
-uv sync
+cd ~/python-project-template
+make setup
 make check
-make generate-default
 ```
 
-Le dernier appel écrit dans `generated/` et refuse un dossier projet existant.
+Générer une démonstration pour inspection et smoke tests :
+
+```bash
+make generate-default
+make clean-generated  # suppression explicite de generated/ uniquement
+```
+
+La génération écrit dans `generated/` et refuse un dossier projet existant.
+`generated/` est jetable, ignoré par Git et ne contient aucune source nécessaire
+au template. Son nettoyage n'est pas implicite dans une autre commande.
+Pour un vrai projet, lancez Cruft depuis le dossier parent souhaité :
+
+```text
+~/projects/
+├── python-project-template/
+└── my-python-project/
+```
+
+Ne placez pas vos projets permanents sous `python-project-template/generated/`.
+Dans le projet créé, `make init` crée un `.git` indépendant, appelle setup,
+installe pre-commit et crée le premier commit. L'identité Git doit être configurée
+par l'utilisateur ; l'auteur du package n'est pas une identité Git automatique.
+Un dépôt parent n'est jamais réinitialisé ou commité par cette commande.
+Les exécutions suivantes ne créent pas de nouveau commit ; les changements
+utilisateur d'un dépôt déjà commité sont préservés. `make setup` synchronise
+seulement l'environnement et les hooks, sans initialiser Git ni commiter.
+
 Modifiez les fichiers dans `{{cookiecutter.project_slug}}/`, les hooks dans
 `hooks/`, les tests dans `tests/`. Le lock racine concerne les outils du
 générateur ; chaque projet généré obtient son propre uv.lock. Si uv est absent
@@ -44,7 +71,41 @@ les scripts shell, Jupytext, la configuration de sécurité, l’isolation Git e
 le cherry-pick dans des dépôts temporaires. Elle exécute réellement setup,
 checks, build et documentation d’un projet généré par défaut. Les tests de
 conteneurs sont conditionnels à la disponibilité d’un moteur utilisable ;
-un skip ne constitue pas une validation d’exécution.
+un skip ne constitue pas une validation d'exécution.
+
+La suite teste aussi `make init` sans dépôt, dans un dépôt parent, sans identité
+Git et lors d'une deuxième exécution. Les tests purement Git isolent Podman ;
+les tests runtime utilisent des ports hôte dynamiques et des projets Compose
+uniques. Les valeurs ergonomiques de `.env.example` restent inchangées.
+
+Depuis WSL, hors conteneur bootstrap, gardez le bootstrap actif s'il occupe
+8000 et validez la suite :
+
+```bash
+cd ~/python-project-template
+make check
+```
+
+Puis créez un projet indépendant dans un emplacement neuf :
+
+```bash
+mkdir -p ~/projects
+cd ~/projects
+cruft create ~/python-project-template
+cd my-python-project
+make init
+make check
+make agent-check
+make agent-start
+make agent-status
+make agent-test
+make agent-stop
+```
+
+Lancez ensuite `make agent` pour valider manuellement l'interactivité Codex.
+La configuration Podman et les diagnostics sont documentés dans le guide
+`docs/podman.md` des projets générés qui utilisent Podman. Ne montez pas le
+socket hôte dans le bootstrap pour contourner une validation indisponible.
 
 Les GitHub Actions et GitLab CI générées reprennent `make check`, `make build`
 et le build documentaire. Pages nécessite l’activation du fournisseur côté

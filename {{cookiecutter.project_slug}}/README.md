@@ -6,10 +6,20 @@ Requires uv, Git and Make. Supported: Linux/WSL2, bash/zsh. macOS is initially
 best effort; native Windows, PowerShell and cmd.exe are outside this version.
 
 ```bash
-make setup
+cruft create <template>  # run from your desired parent directory, e.g. ~/projects
+cd {{ cookiecutter.project_slug }}
+make init
 make shell
 make check
 ```
+
+`make init` creates an independent project-local Git repository, runs setup,
+installs pre-commit and creates the first commit. Configure `git config --global
+user.name` and `git config --global user.email` first. It never commits changes
+automatically when an initial commit already exists. `make setup` only prepares
+or synchronizes the environment and hooks; it never initializes or commits Git.
+The template's ignored `generated/` directory is for disposable smoke tests,
+not the recommended location for your real project.
 
 Use `exit` to leave the activated child shell. uv remains directly available:
 `uv add pandas`, `uv remove pandas`, `uv sync`, `uv run pytest`, `uv tree`, `uv build`.
@@ -43,8 +53,8 @@ must be writable by container UID 1000; use Podman's keep-id mapping otherwise.
 {% if cookiecutter.enable_agent == 'yes' %}
 
 Secure agent: install/configure **Podman rootless** and a Compose provider
-(`podman-compose` or Docker Compose as a provider for Podman), then initialize
-Git and commit the generated project. Run `make agent-check` and `make agent`.
+(`podman-compose` or Docker Compose as a provider for Podman). After `make init`,
+run `make agent-check` and `make agent`.
 Codex runs as non-root in an independent clone, with dedicated authentication
 storage. First sign-in may require `codex login --device-auth` in `make agent-shell`.
 The primary checkout must be clean. Review with `make agent-diff`, test with
@@ -57,5 +67,6 @@ all committed files provided to the clone are readable by the agent. Do not
 commit secrets. Host HOME, engine sockets and the primary checkout are never mounted.
 {% if cookiecutter.enable_docs == 'yes' %}
 See [agent security](docs/agent-security.md) for the threat model and limitations.
+See [Podman setup](docs/podman.md) for rootless installation, socket and diagnostics.
 {% endif %}
 {% endif %}

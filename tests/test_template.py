@@ -7,12 +7,16 @@ import importlib.util
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tomllib
 import zipfile
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import ModuleType
+from uuid import uuid4
 
 import jupytext
 import pytest
@@ -56,6 +60,8 @@ def test_default_structure(default_project: Path) -> None:
         "tests/unit/test_package.py",
         "tests/integration/test_cli.py",
         "docs/agent-security.md",
+        "docs/podman.md",
+        "scripts/init_project.py",
         "notebooks/01_example.py",
         "containers/Containerfile",
         "containers/compose.yaml",
@@ -83,6 +89,7 @@ def test_default_structure(default_project: Path) -> None:
         {"dev_container_runtime": "docker"},
         {"dev_container_runtime": "none"},
         {"enable_agent": "no"},
+        {"dev_container_runtime": "docker", "enable_agent": "no"},
         {"enable_notebooks": "no"},
         {"enable_docs": "no"},
         {"ci_provider": "gitlab"},
@@ -111,6 +118,7 @@ def test_option_matrix(tmp_path: Path, options: dict[str, str]) -> None:
     assert (project / "mkdocs.yml").exists() == docs
     assert (project / "notebooks").exists() == notebooks
     assert (project / "jupytext.toml").exists() == notebooks
+    assert (project / "docs/podman.md").exists() == (docs and (agent or runtime == "podman"))
     assert (project / ".github").exists() == (ci == "github")
     assert (project / ".gitlab-ci.yml").exists() == (ci == "gitlab")
     help_text = command(project, "make", "help")
@@ -226,10 +234,149 @@ def configure_agent(project: Path) -> ModuleType:
     return helper
 
 
-def test_git_isolation_and_apply(tmp_path: Path) -> None:
+def git_identity_environment(directory: Path, configured: bool = True) -> dict[str, str]:
+    config = directory / "identity.gitconfig"
+    config.write_text(
+        "[user]\nname = Template Test\nemail = test@example.invalid\n" if configured else ""
+    )
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
+def test_init_and_idempotence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = generate(tmp_path)
+    env = git_identity_environment(tmp_path)
+    assert "initialized" in command(project, "make", "init", env=env)
+    assert (project / ".git").is_dir()
+    assert Path(command(project, "git", "rev-parse", "--show-toplevel").strip()) == project
+    assert (
+        command(project, "git", "log", "-1", "--format=%s").strip() == "chore: initialize project"
+    )
+    assert (project / ".venv/bin/python").exists()
+    assert (project / ".git/hooks/pre-commit").exists()
+    first = command(project, "git", "rev-parse", "HEAD")
+    (project / ".env").write_text("KEEP_LOCAL=yes\n")
+    (project / "user-change.txt").write_text("do not commit")
+    output = command(project, "make", "init", env=env)
+    assert "Initial commit: already present" in output
+    assert command(project, "git", "rev-parse", "HEAD") == first
+    assert (project / ".env").read_text() == "KEEP_LOCAL=yes\n"
+    assert "?? user-change.txt" in command(project, "git", "status", "--porcelain")
+    (project / "user-change.txt").unlink()
+    helper = configure_agent(project)
+    monkeypatch.setattr(helper, "running_containers", lambda: False)
+    assert helper.prepare()["base"] == first.strip()
+
+
+def test_init_inside_parent_repository(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / ".gitignore").write_text("my-python-project/\n")
+    initialize(parent)
+    before = command(parent, "git", "rev-parse", "HEAD")
+    index = (parent / ".git/index").read_bytes()
+    project = generate(parent)
+    helper = configure_agent(project)
+    with pytest.raises(ValueError, match="parent Git repository"):
+        helper.prepare()
+    assert not (project / ".git").exists()
+    output = command(project, "make", "init", env=git_identity_environment(tmp_path))
+    assert "Parent Git repository detected" in output
+    assert Path(command(project, "git", "rev-parse", "--show-toplevel").strip()) == project
+    assert (project / ".git").is_dir()
+    assert command(parent, "git", "rev-parse", "HEAD") == before
+    assert command(parent, "git", "status", "--porcelain").strip() == ""
+    assert (parent / ".git/index").read_bytes() == index
+
+
+def test_init_missing_identity_and_resume(tmp_path: Path) -> None:
+    project = generate(tmp_path)
+    result = subprocess.run(
+        ["make", "init"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=git_identity_environment(tmp_path, configured=False),
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Git identity is not configured" in result.stderr
+    assert 'git config --global user.name "Your Name"' in result.stderr
+    assert "make init" in result.stderr
+    assert (project / ".git").is_dir()
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"], cwd=project, capture_output=True, check=False
+    )
+    assert head.returncode != 0
+    command(project, "make", "init", env=git_identity_environment(tmp_path))
+    assert command(project, "git", "rev-list", "--count", "HEAD").strip() == "1"
+
+
+def test_init_preserves_existing_unborn_repository(tmp_path: Path) -> None:
+    project = generate(tmp_path)
+    command(project, "git", "init", "-b", "main")
+    (project / "user-work.txt").write_text("do not commit implicitly")
+    result = subprocess.run(
+        ["make", "init"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=git_identity_environment(tmp_path),
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Existing work will not be committed automatically" in result.stderr
+    assert command(project, "git", "diff", "--cached", "--name-only").strip() == ""
+
+
+def test_agent_requires_initial_commit(tmp_path: Path) -> None:
+    project = generate(tmp_path)
+    helper = configure_agent(project)
+    with pytest.raises(ValueError, match="make init"):
+        helper.prepare()
+    command(project, "git", "init", "-b", "main")
+    with pytest.raises(ValueError, match="at least one commit.*make init"):
+        helper.prepare()
+
+
+def test_demo_generation_and_explicit_cleanup(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    for name in ("Makefile", "cookiecutter.json"):
+        shutil.copyfile(ROOT / name, template / name)
+    for name in ("hooks", "scripts", "{{cookiecutter.project_slug}}"):
+        shutil.copytree(ROOT / name, template / name, ignore=shutil.ignore_patterns("__pycache__"))
+    neighbor = tmp_path / "user-project"
+    neighbor.mkdir()
+    (neighbor / "keep.txt").write_text("preserve")
+    output = command(template, "make", "generate-default")
+    assert "validation only" in output and "disposable and ignored by Git" in output
+    assert "generated/my-python-project" in output
+    project = template / "generated/my-python-project"
+    assert project.is_dir()
+    (project / "user-note.txt").write_text("not silently overwritten")
+    repeated = subprocess.run(
+        ["make", "generate-default"], cwd=template, capture_output=True, text=True, check=False
+    )
+    assert repeated.returncode != 0
+    assert (project / "user-note.txt").exists()
+    command(template, "make", "clean-generated")
+    assert not (template / "generated").exists()
+    assert (neighbor / "keep.txt").read_text() == "preserve"
+    (template / "generated").symlink_to(neighbor, target_is_directory=True)
+    refused = subprocess.run(
+        ["make", "clean-generated"], cwd=template, capture_output=True, text=True, check=False
+    )
+    assert refused.returncode != 0
+    assert (neighbor / "keep.txt").read_text() == "preserve"
+
+
+def test_git_isolation_and_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = generate(tmp_path)
     initialize(project)
     helper = configure_agent(project)
+    monkeypatch.setattr(helper, "running_containers", lambda: False)
     result = helper.prepare()
     clone = Path(result["workspace"])
     assert (project / ".git").is_dir() and (clone / ".git").is_dir()
@@ -248,15 +395,16 @@ def test_git_isolation_and_apply(tmp_path: Path) -> None:
     command(clone, "git", "commit", "-m", "feat: agent example")
     diff = command(project, "make", "agent-diff")
     assert "feat: agent example" in diff and "AGENT_CHANGE" in diff
-    command(project, "make", "agent-apply")
+    helper.apply()
     assert "AGENT_CHANGE" in (project / file).read_text()
     assert command(project, "git", "status", "--porcelain").strip() == ""
 
 
-def test_git_safety_refusals(tmp_path: Path) -> None:
+def test_git_safety_refusals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = generate(tmp_path)
     initialize(project)
     helper = configure_agent(project)
+    monkeypatch.setattr(helper, "running_containers", lambda: False)
     (project / "dirty.txt").write_text("unsaved")
     with pytest.raises(ValueError, match="Uncommitted"):
         helper.prepare()
@@ -352,6 +500,30 @@ def test_yaml_configuration(default_project: Path) -> None:
                 assert yaml.safe_load(path.read_text()) is not None
 
 
+def test_bootstrap_documentation(default_project: Path) -> None:
+    guide = (default_project / "docs/podman.md").read_text()
+    for text in (
+        "uidmap",
+        "fuse-overlayfs",
+        "passt",
+        "/etc/subuid",
+        "/etc/subgid",
+        "systemctl --user enable --now podman.socket",
+        "podman compose version",
+        "podman ps",
+        "https://example.com",
+        "127.0.0.1:18080:80",
+        "wsl --shutdown",
+        "ss -ltnp",
+        "{{.Host.Security.Rootless}}",
+    ):
+        assert text in guide
+    assert "podman.md" in (default_project / "mkdocs.yml").read_text()
+    assert "make init" in (default_project / "docs/getting-started.md").read_text()
+    assert "make init" in (default_project / "README.md").read_text()
+    assert "jetable" in (ROOT / "README.md").read_text()
+
+
 def test_cruft_create_check_diff(tmp_path: Path) -> None:
     source = tmp_path / "template"
     source.mkdir()
@@ -402,18 +574,88 @@ def test_agent_environment_validation(
         helper.environment()
 
 
-def test_dev_container_runtime(tmp_path: Path) -> None:
+def dynamic_ports(prefix: str) -> dict[str, str]:
+    """Reserve distinct ephemeral loopback ports together, then release for Compose."""
+    with ExitStack() as stack:
+        ports = {}
+        for name in ("APP", "JUPYTER", "DOCS"):
+            sock = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+            sock.bind(("127.0.0.1", 0))
+            ports[f"{prefix}_{name}_PORT"] = str(sock.getsockname()[1])
+        return ports
+
+
+@contextmanager
+def runtime_cleanup(cleanup: Callable[[], object]) -> Iterator[None]:
+    original: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        original = exc
+        raise
+    finally:
+        try:
+            cleanup()
+        except Exception as exc:
+            if original is None:
+                raise
+            original.add_note(f"Container cleanup also failed: {exc}")
+
+
+def test_dynamic_ports_with_common_port_occupied() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        try:
+            occupied.bind(("127.0.0.1", 8000))
+            occupied.listen()
+        except OSError as exc:
+            import errno
+
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            # Another service already owns 8000: this is exactly the case under test.
+        for prefix in ("DEV", "AGENT"):
+            ports = dynamic_ports(prefix)
+            assert len(set(ports.values())) == 3
+            for value in ports.values():
+                assert int(value) != 8000
+                with socket.socket() as available:
+                    available.bind(("127.0.0.1", int(value)))
+
+
+def test_cleanup_preserves_original_failure() -> None:
+    def failing_cleanup() -> None:
+        raise RuntimeError("cleanup failed")
+
+    with pytest.raises(AssertionError, match="original failure") as caught:
+        with runtime_cleanup(failing_cleanup):
+            raise AssertionError("original failure")
+    assert "cleanup failed" in caught.value.__notes__[0]
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        with runtime_cleanup(failing_cleanup):
+            pass
+
+
+def test_dev_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = shutil.which("podman") or shutil.which("docker")
     if not runtime:
         pytest.skip("Docker and Podman unavailable: dev build/start/import not executed")
     usable = subprocess.run([runtime, "info"], capture_output=True, check=False)
     if usable.returncode:
         pytest.skip("Container engine installed but unusable in this environment")
-    project = generate(tmp_path, dev_container_runtime=Path(runtime).name)
+    for key, value in dynamic_ports("DEV").items():
+        monkeypatch.setenv(key, value)
+    project = generate(
+        tmp_path,
+        dev_container_runtime=Path(runtime).name,
+        project_slug=f"runtime-dev-{uuid4().hex[:12]}",
+        package_name="my_python_project",
+    )
+    # An exported user COMPOSE_PROJECT_NAME must not redirect cleanup to a real stack.
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", f"{project.name}-dev")
     command(project, "make", "setup")
-    try:
+    prefix = (runtime, "compose", "--env-file", ".env", "-f", "containers/compose.yaml")
+    with runtime_cleanup(lambda: command(project, *prefix, "down", "--volumes")):
         command(project, "make", "dev-up")
-        prefix = (runtime, "compose", "--env-file", ".env", "-f", "containers/compose.yaml")
         command(project, *prefix, "exec", "-T", "dev", "uv", "sync", "--locked")
         command(
             project,
@@ -428,11 +670,9 @@ def test_dev_container_runtime(tmp_path: Path) -> None:
             "import my_python_project",
         )
         assert command(project, *prefix, "exec", "-T", "dev", "id", "-u").strip() != "0"
-    finally:
-        command(project, "make", "dev-down")
 
 
-def test_agent_container_runtime(tmp_path: Path) -> None:
+def test_agent_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     if not shutil.which("podman"):
         pytest.skip("Podman unavailable: agent/security/HTTP-port runtime tests not executed")
     info = subprocess.run(
@@ -442,11 +682,16 @@ def test_agent_container_runtime(tmp_path: Path) -> None:
         "rootless"
     ):
         pytest.skip("Usable rootless Podman unavailable")
-    project = generate(tmp_path)
-    initialize(project)
+    for key, value in dynamic_ports("AGENT").items():
+        monkeypatch.setenv(key, value)
+    project = generate(
+        tmp_path, project_slug=f"runtime-agent-{uuid4().hex[:12]}", package_name="my_python_project"
+    )
+    command(project, "make", "init", env=git_identity_environment(tmp_path))
     helper = configure_agent(project)
-    try:
-        helper.start()
+    with runtime_cleanup(lambda: helper.compose("down", "--volumes")):
+        command(project, "make", "agent-check")
+        command(project, "make", "agent-start")
         assert helper.compose("exec", "-T", "agent", "id", "-u", capture=True) == "1000"
         helper.compose("exec", "-T", "agent", "make", "check")
         helper.compose("exec", "-T", "agent", "codex", "--version")
@@ -507,5 +752,3 @@ def test_agent_container_runtime(tmp_path: Path) -> None:
             "1",
             f"http://127.0.0.1:{port}",
         )
-    finally:
-        helper.compose("down")

@@ -1,5 +1,10 @@
 # Containers
 
+{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.enable_agent == 'yes' %}
+Start with the [Podman rootless installation and diagnostics guide](podman.md),
+including the user socket, Compose smoke test and WSL2 troubleshooting.
+{% endif %}
+
 The shared Containerfile provides base → dev and, when enabled, base → agent.
 Python's image follows `.python-version` at generation time; change both on a
 Python upgrade. uv and Codex versions are pinned; OS package revisions and base

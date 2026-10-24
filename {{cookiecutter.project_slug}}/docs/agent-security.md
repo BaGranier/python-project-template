@@ -26,15 +26,18 @@ It does not contain a container engine. Rebuilds and service changes are host ac
 
 ## Start and authentication
 
-Install Podman rootless plus a working Compose provider. See the
-[rootless setup guide](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md).
-Configure subordinate UID/GID ranges and newuidmap/newgidmap as required by
-your distribution. `podman info` must report rootless. No helper runs sudo.
+Follow [Podman setup](podman.md) for installation, subordinate UID/GID ranges,
+the rootless user socket, Compose provider and diagnostic commands.
+The socket remains on the host and is never mounted in the agent or bootstrap
+container. `podman info` must report rootless. No helper runs sudo.
 
-Run `make agent-check`, commit/stash changes in the main checkout, then
+Run `make init` to create an independent repository and initial commit, then
+`make agent-check`. Commit/stash any later changes in the main checkout, then
 `make agent`. Existing clones resume only while primary HEAD equals the saved
 base. State (base, branch, workspace, timestamp) lives in `.agent/state.json`,
 outside the mounted workspace. The branch is `agent/<UTC timestamp>`.
+`make agent` never initializes Git automatically; a parent repository alone
+is insufficient. Use `make setup` for subsequent environment synchronization.
 
 Codex authentication persists in the project-specific named volume
 `{{ cookiecutter.project_slug }}-agent-codex-home`; the real `~/.codex` is never mounted.

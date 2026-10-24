@@ -4,10 +4,12 @@ SHELL := /bin/bash
 RUNTIME := {{ cookiecutter.dev_container_runtime }}
 COMPOSE := $(RUNTIME) compose --env-file .env -f containers/compose.yaml
 {% endif %}
-.PHONY: help setup sync shell format format-check lint typecheck test test-unit test-integration coverage check build clean
+.PHONY: help init setup sync shell format format-check lint typecheck test test-unit test-integration coverage check build clean
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-setup: ## Synchronize uv, preserve .env, install Git hooks if applicable
+init: ## Initialize an independent Git repo, environment, hooks and first commit
+	uv run --no-project --python "$$(cat .python-version)" python scripts/init_project.py
+setup: ## Synchronize environment and hooks; never initialize or commit Git
 	uv sync
 	uv run python scripts/setup.py
 sync: ## Synchronize the environment (uv remains directly usable)

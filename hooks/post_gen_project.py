@@ -37,6 +37,8 @@ if context["dev_container_runtime"] == "none":
 if context["dev_container_runtime"] == "none" and context["enable_agent"] == "no":
     remove("containers")
     remove("docs/containers.md")
+if context["dev_container_runtime"] != "podman" and context["enable_agent"] == "no":
+    remove("docs/podman.md")
 # Conditional Jinja blocks can leave blank endings or whitespace when a value
 # is empty. Ship text already compliant with the generated pre-commit hooks.
 for path in Path(".").rglob("*"):
@@ -54,4 +56,4 @@ if shutil.which("uv"):
         print(f"Lock generation failed: {exc}")
 if not Path("uv.lock").exists():
     print("uv lock was not generated.\nInstall uv and run:\nmake setup")
-print("Project generated. Next: cd {{ cookiecutter.project_slug }} && make setup")
+print("Project generated. Next: cd {{ cookiecutter.project_slug }} && make init")

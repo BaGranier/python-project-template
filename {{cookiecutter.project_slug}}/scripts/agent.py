@@ -94,8 +94,41 @@ def state() -> dict[str, str]:
 
 
 def prepare() -> dict[str, str]:
-    if Path(git(ROOT, "rev-parse", "--show-toplevel")).resolve() != ROOT:
-        raise ValueError("Initialize and commit this project as its own Git repository first.")
+    detected = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    local_git = ROOT / ".git"
+    if (
+        detected.returncode != 0
+        or not local_git.is_dir()
+        or local_git.is_symlink()
+        or Path(detected.stdout.strip()).resolve() != ROOT
+    ):
+        parent = ""
+        if detected.returncode == 0 and Path(detected.stdout.strip()).resolve() != ROOT:
+            parent = (
+                "A parent Git repository was detected, but this project does not "
+                "have its own repository.\n\n"
+            )
+        raise ValueError(
+            "This directory is not an independent Git repository.\n\n"
+            + parent
+            + "The secure agent requires a project-local .git directory and at least one commit."
+            + "\n\nRun:\n\n    make init\n\nthen:\n\n    make agent"
+        )
+    head = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if head.returncode != 0:
+        raise ValueError(
+            "The secure agent requires at least one commit. Run make init, then make agent."
+        )
     clean_repository(ROOT)
     if git(ROOT, "check-ignore", ".agent/workspace") != ".agent/workspace":
         raise ValueError(".agent/ must be ignored by the primary repository.")

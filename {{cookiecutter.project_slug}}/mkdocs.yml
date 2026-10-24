@@ -14,6 +14,9 @@ nav:
 {% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.enable_agent == 'yes' %}
   - Containers: containers.md
 {% endif %}
+{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.enable_agent == 'yes' %}
+  - Podman setup: podman.md
+{% endif %}
 {% if cookiecutter.enable_agent == 'yes' %}
   - Agent security: agent-security.md
 {% endif %}

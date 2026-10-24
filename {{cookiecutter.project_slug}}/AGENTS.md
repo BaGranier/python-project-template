@@ -11,6 +11,8 @@ Use uv, uv_build, Make, Ruff, mypy, pytest and pre-commit.
 {% endif %}
 Sources of truth: `pyproject.toml`, `uv.lock`, `.python-version`.
 Use `uv add`, `uv remove`, `uv sync`. No requirements.txt or Poetry without request.
+First-time project initialization: `make init` creates local Git, environment,
+hooks and the first commit. `make setup` only synchronizes environment/hooks.
 
 ## Structure
 
