@@ -1,0 +1,20 @@
+site_name: {{ cookiecutter.project_name | tojson }}
+theme:
+  name: material
+strict: true
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Development: development.md
+  - Architecture: architecture.md
+  - Testing: testing.md
+{% if cookiecutter.enable_notebooks == 'yes' %}
+  - Notebooks: notebooks.md
+{% endif %}
+{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.enable_agent == 'yes' %}
+  - Containers: containers.md
+{% endif %}
+{% if cookiecutter.enable_agent == 'yes' %}
+  - Agent security: agent-security.md
+{% endif %}
+  - Decisions: adr/README.md

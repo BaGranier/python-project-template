@@ -1,0 +1,28 @@
+name: {{ cookiecutter.project_slug }}-dev
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: containers/Containerfile
+      target: dev
+    working_dir: /workspace
+{% if cookiecutter.dev_container_runtime == 'podman' %}
+    userns_mode: "keep-id:uid=1000,gid=1000"
+{% endif %}
+    volumes:
+      - ..:/workspace:Z
+      - dev-venv:/opt/venv
+      - dev-cache:/home/agent/.cache/uv
+    ports:
+      - "127.0.0.1:${DEV_APP_PORT:-8000}:8000"
+{% if cookiecutter.enable_notebooks == 'yes' %}
+      - "127.0.0.1:${DEV_JUPYTER_PORT:-8888}:8888"
+{% endif %}
+{% if cookiecutter.enable_docs == 'yes' %}
+      - "127.0.0.1:${DEV_DOCS_PORT:-8001}:8001"
+{% endif %}
+    stdin_open: true
+    tty: true
+volumes:
+  dev-venv:
+  dev-cache:

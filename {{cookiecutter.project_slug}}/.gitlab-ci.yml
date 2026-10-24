@@ -1,0 +1,31 @@
+image: ghcr.io/astral-sh/uv:0.13.5-python{{ cookiecutter.python_version.split('.')[0:2] | join('.') }}-bookworm-slim
+stages: [check, build, deploy]
+before_script:
+  - apt-get update && apt-get install -y --no-install-recommends make git
+  - uv sync --locked
+check:
+  stage: check
+  script:
+    - make check
+build:
+  stage: build
+  script:
+    - make build
+{% if cookiecutter.enable_docs == 'yes' %}
+    - make docs-build
+{% endif %}
+  artifacts:
+    paths: [dist/]
+{% if cookiecutter.enable_docs == 'yes' %}
+pages:
+  stage: deploy
+  script:
+    - make docs-build
+    - mv site public
+  pages:
+    publish: public
+  artifacts:
+    paths: [public/]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+{% endif %}

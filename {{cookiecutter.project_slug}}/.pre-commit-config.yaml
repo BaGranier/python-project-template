@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-toml
+      - id: check-yaml
+  - repo: local
+    hooks:
+      - id: ruff
+        name: Ruff (locked uv environment)
+        entry: uv run --locked ruff check --fix
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: Ruff format (locked uv environment)
+        entry: uv run --locked ruff format
+        language: system
+        types_or: [python, pyi]
