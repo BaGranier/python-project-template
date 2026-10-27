@@ -36,7 +36,12 @@ of the user's Git identity. Real projects belong beside the template, not in
 its disposable ignored `generated/` directory.
 {% if cookiecutter.coding_agent != 'none' %}
 
+{% if cookiecutter.coding_agent == 'custom' %}
+After initialization, use `make agent-check`, `make agent-start`, then `make agent-shell`.
+Install/configure your harness reproducibly as described in [agent workflow](agent.md).
+{% else %}
 After initialization, use `make agent-check`, then `make agent-login` and `make agent`.
+{% endif %}
 For noninteractive validation use `make agent-start`, `make agent-status`,
 and `make agent-test`. Read [Podman setup](podman.md) first.
 {% endif %}

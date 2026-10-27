@@ -28,6 +28,13 @@ if context["ci_provider"] != "github":
     remove(".github")
 if context["ci_provider"] != "gitlab":
     remove(".gitlab-ci.yml")
+if context["coding_agent"] == "both":
+    shutil.copyfile("AGENTS.md", "CLAUDE.md")
+if context["coding_agent"] == "custom":
+    remove("AGENTS.md")
+    remove("CLAUDE.md")
+if context["coding_agent"] != "custom":
+    remove("containers/agent-custom-install.sh")
 if context["coding_agent"] == "none":
     remove("scripts/agent.py")
     remove("containers/compose.agent.yaml")

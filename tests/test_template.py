@@ -403,7 +403,7 @@ def test_demo_generation_and_explicit_cleanup(tmp_path: Path) -> None:
     assert (neighbor / "keep.txt").read_text() == "preserve"
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom"])
 def test_git_isolation_and_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
@@ -558,7 +558,7 @@ def test_bootstrap_documentation(default_project: Path) -> None:
     assert "jetable" in (ROOT / "README.md").read_text()
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude", "none"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom", "none"])
 def test_cruft_create_check_diff(tmp_path: Path, provider: str) -> None:
     source = tmp_path / "template"
     source.mkdir()
@@ -800,14 +800,14 @@ def test_published_ports_reject_nonlocal_bind(default_project: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude", "none"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom", "none"])
 def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
     project = generate(tmp_path, coding_agent=provider)
     containerfile = (project / "containers/Containerfile").read_text()
     help_text = command(project, "make", "help")
     instructions = {"codex": "AGENTS.md", "claude": "CLAUDE.md"}
     for choice, name in instructions.items():
-        assert (project / name).exists() == (provider == choice)
+        assert (project / name).exists() == (provider == choice or provider == "both")
     if provider == "none":
         assert not (project / "scripts/agent.py").exists()
         assert not (project / "containers/compose.agent.yaml").exists()
@@ -816,7 +816,6 @@ def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
         assert "@openai" not in containerfile and "@anthropic" not in containerfile
         assert "agent-check" not in (project / "docs/podman.md").read_text()
     else:
-        assert "agent-login" in help_text
         config = yaml.safe_load((project / "containers/compose.agent.yaml").read_text())
         service = config["services"]["agent"]
         assert service["user"] == "1000:1000"
@@ -824,23 +823,45 @@ def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
         assert "no-new-privileges:true" in service["security_opt"]
         assert not service.get("privileged") and service.get("network_mode") != "host"
         assert all(port.startswith("127.0.0.1:") for port in service["ports"])
-        assert f"agent-{provider}-home:/home/agent/.{provider}" in service["volumes"]
-        assert config["volumes"][f"agent-{provider}-home"]["name"].endswith(
-            f"agent-{provider}-home"
+        installed = (
+            {"codex", "claude"}
+            if provider == "both"
+            else ({provider} if provider != "custom" else set())
         )
-        selected, other = (
-            ("@openai/codex", "@anthropic-ai/claude-code")
-            if provider == "codex"
-            else ("@anthropic-ai/claude-code", "@openai/codex")
-        )
-        assert selected in containerfile and other not in containerfile
+        for name, package in {
+            "codex": "@openai/codex",
+            "claude": "@anthropic-ai/claude-code",
+        }.items():
+            assert (package in containerfile) == (name in installed)
+            assert (f"agent-{name}-home:/home/agent/.{name}" in service["volumes"]) == (
+                name in installed
+            )
         assert "FROM node:22." in containerfile
+        assert "agent-rebuild" in help_text
         helper = configure_agent(project)
-        assert helper.AGENT.login == (
-            ("codex", "login", "--device-auth")
-            if provider == "codex"
-            else ("claude", "auth", "login")
-        )
+        assert set(helper.AGENTS) == installed
+        if provider == "custom":
+            assert "agent-login" not in help_text
+            assert "agent-tools:/home/agent/.local" in service["volumes"]
+            assert "agent-config:/home/agent/.config" in service["volumes"]
+            assert (project / "containers/agent-custom-install.sh").is_file()
+            command(project, "bash", "-n", "containers/agent-custom-install.sh")
+            assert helper.selected_agent() is None
+        else:
+            assert "agent-login" in help_text
+            assert helper.selected_agent().login == (
+                ("claude", "auth", "login")
+                if provider == "claude"
+                else ("codex", "login", "--device-auth")
+            )
+        if provider == "both":
+            for target in (
+                "agent-codex",
+                "agent-claude",
+                "agent-login-codex",
+                "agent-login-claude",
+            ):
+                assert target in help_text
     command(project, "make", "init", env=git_identity_environment(tmp_path))
     command(project, "make", "check")
     command(project, "make", "build")
@@ -880,11 +901,11 @@ def test_login_and_launch_dispatch(
     monkeypatch.setattr(helper, "compose", lambda *args: calls.append(args))
     monkeypatch.setattr(sys, "argv", ["agent.py", "login"])
     helper.main()
-    assert calls == [("start",), ("exec", "agent", *helper.AGENT.login)]
+    assert calls == [("start",), ("exec", "agent", *helper.selected_agent().login)]
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["agent.py", "run"])
     helper.main()
-    assert calls == [("start",), ("exec", "agent", *helper.AGENT.launch)]
+    assert calls == [("start",), ("exec", "agent", *helper.selected_agent().launch)]
 
 
 def test_compose_selection_and_warning(
@@ -1055,7 +1076,7 @@ def test_dev_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         assert command(project, *prefix, "exec", "-T", "dev", "id", "-u").strip() != "0"
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude"])
+@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom"])
 def test_agent_container_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
@@ -1076,6 +1097,14 @@ def test_agent_container_runtime(
         package_name="my_python_project",
         coding_agent=provider,
     )
+    if provider == "custom":
+        (project / "containers/agent-custom-install.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            "mkdir -p /opt/agent-tools/bin\n"
+            "printf '%s\\n' '#!/bin/sh' 'echo fake-harness \"$PWD\" \"$@\"' "
+            "> /opt/agent-tools/bin/fake-harness\n"
+            "chmod +x /opt/agent-tools/bin/fake-harness\n"
+        )
     command(project, "make", "init", env=git_identity_environment(tmp_path))
     helper = configure_agent(project)
     with runtime_cleanup(lambda: helper.compose("down", "--volumes")):
@@ -1083,17 +1112,62 @@ def test_agent_container_runtime(
         command(project, "make", "agent-start")
         assert helper.compose("exec", "-T", "agent", "id", "-u", capture=True) == "1000"
         helper.compose("exec", "-T", "agent", "make", "check")
-        helper.compose("exec", "-T", "agent", helper.AGENT.cli, "--version")
+        for agent in helper.AGENTS.values():
+            helper.compose("exec", "-T", "agent", agent.cli, "--version")
+        if provider == "custom":
+            helper.compose(
+                "exec",
+                "-T",
+                "agent",
+                "python",
+                "-c",
+                "import shutil; assert shutil.which('codex') is None; "
+                "assert shutil.which('claude') is None",
+            )
         helper.compose("exec", "-T", "agent", "node", "--version")
         helper.compose("exec", "-T", "agent", "npm", "--version")
-        config_sentinel = helper.AGENT.config_dir + "/template-test-sentinel"
-        helper.compose("exec", "-T", "agent", "touch", config_sentinel)
+        config_sentinels = [
+            path + "/template-test-sentinel" for path in helper.PERSISTENT_PATHS.values()
+        ]
+        for sentinel_path in config_sentinels:
+            helper.compose("exec", "-T", "agent", "touch", sentinel_path)
+        if provider == "custom":
+            (project / ".env").write_text(
+                (project / ".env").read_text()
+                + "\nCUSTOM_AGENT_COMMAND=fake-harness\nCUSTOM_AGENT_ARGS=--example\n"
+            )
+            assert "fake-harness /workspace --example" in command(project, "make", "agent")
+            helper.compose(
+                "exec",
+                "-T",
+                "agent",
+                "python",
+                "-c",
+                "from pathlib import Path; Path('/opt/agent-tools/bin/fake-harness').unlink()",
+            )
         command(project, "make", "agent-stop")
-        command(project, "make", "agent-start")
-        helper.compose("exec", "-T", "agent", "test", "-f", config_sentinel)
+        if provider != "custom":
+            command(project, "make", "agent-start")
+            for sentinel_path in config_sentinels:
+                helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
         command(project, "make", "agent-clean")
+        if provider == "custom":
+            command(project, "make", "agent-rebuild")
         command(project, "make", "agent-start")
-        helper.compose("exec", "-T", "agent", "test", "-f", config_sentinel)
+        for sentinel_path in config_sentinels:
+            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
+        if provider == "custom":
+            assert "fake-harness /workspace --example" in command(project, "make", "agent")
+        if provider == "both":
+            helper.compose(
+                "exec",
+                "-T",
+                "agent",
+                "python",
+                "-c",
+                f"from pathlib import Path; Path({config_sentinels[0]!r}).unlink()",
+            )
+            helper.compose("exec", "-T", "agent", "test", "-f", config_sentinels[1])
         ids = helper.compose("ps", "-q", capture=True).splitlines()
         inspection = json.loads(command(project, "podman", "inspect", *ids))[0]
         mounts = inspection["Mounts"]

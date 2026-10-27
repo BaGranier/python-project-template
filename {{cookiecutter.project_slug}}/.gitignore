@@ -15,9 +15,10 @@ site/
 .ipynb_checkpoints/
 *.ipynb
 .agent/
-{% if cookiecutter.coding_agent == 'codex' %}
+{% if cookiecutter.coding_agent in ['codex', 'both'] %}
 .codex/
-{% elif cookiecutter.coding_agent == 'claude' %}
+{% endif %}
+{% if cookiecutter.coding_agent in ['claude', 'both'] %}
 .claude.json
 .claude/
 {% endif %}

@@ -12,15 +12,20 @@ This configuration is unsuitable for untrusted repositories containing secrets.
 
 ## Boundary and access
 
-The host starts the stack. The selected coding agent runs as UID 1000 without sudo, with all Linux
+The host starts the stack. Sandbox processes run as UID 1000 without sudo, with all Linux
 capabilities dropped and no-new-privileges. No privileged mode, host network,
 engine socket, host HOME, SSH/GPG/AWS directories or primary Git directory is
 mounted. The sole host bind mount is `.agent/workspace` at `/workspace`.
 It contains an independent clone with its own objects, no hardlinks, no object
 alternates and no origin remote pointing back to the host.
 
-The selected CLI's internal approval/permission restrictions are disabled **only inside this
-dedicated container**. The container provides the boundary and permits normal
+{% if cookiecutter.coding_agent == 'custom' %}
+A custom harness keeps its own permission behavior; choosing custom does not
+disable any Podman security constraint. Blank sandbox does not mean trusted harness.
+{% else %}
+Official CLI internal approval/permission restrictions are bypassed **only inside this
+dedicated container**.
+{% endif %} The container provides the boundary and permits normal
 uv/Git/test/server work without repeatedly asking for host permissions.
 It does not contain a container engine. Rebuilds and service changes are host actions.
 
@@ -34,7 +39,7 @@ container. `podman info` must report rootless. No helper runs sudo.
 Run `make init` to create an independent repository and initial commit, then
 `make agent-check`. Commit/stash any later changes in the main checkout, then
 `make agent`. Existing clones resume only while primary HEAD equals the saved
-base. State (provider, base, branch, workspace, timestamp) lives in `.agent/state.json`,
+base. State (profile, legacy provider, base, branch, workspace, timestamp) lives in `.agent/state.json`,
 outside the mounted workspace. The branch is `agent/<UTC timestamp>`.
 `make agent` never initializes Git automatically; a parent repository alone
 is insufficient. Use `make setup` for subsequent environment synchronization.
@@ -45,6 +50,12 @@ is mounted. Never bake keys into images or commit them.
 No API key or host `.env` is automatically forwarded. If needed, explicitly
 pass a runtime variable through a locally reviewed Compose override (and keep
 that file ignored); this grants the agent access to that credential.
+
+{% if cookiecutter.coding_agent == 'both' %}
+The two authentication stores use separate named volumes. Both harnesses run
+as the same UID in one container, so either can read both mounted stores.
+Treat credentials supplied to this sandbox as accessible to both harnesses.
+{% endif %}
 
 ## Ports and network
 
@@ -79,3 +90,10 @@ archive outside the checkout before starting a new session. This explicit step
 preserves uncommitted work. Named volumes persist between sessions; use distinct
 project slugs for distinct projects. Delete credential volumes only deliberately
 with Podman after confirming they are no longer needed.
+
+Installing a harness gives it access to the clone, outbound network, explicitly
+provided credentials and services reachable from the sandbox network. A blank
+custom sandbox is not a trust guarantee for tools later installed inside it.
+For a tool-specific HOME credential directory, add a dedicated named volume at
+that path. Never bind the host HOME, `.config`, SSH/GPG/AWS directories or engine
+sockets to make a custom tool work.

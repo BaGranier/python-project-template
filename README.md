@@ -16,8 +16,17 @@ Cookiecutter reste utilisable directement :
 `uvx cookiecutter <URL-ou-chemin-du-template>`.
 Les questions couvrent le nom, slug, package, description, auteur, Python,
 runtime de développement (Podman/Docker/aucun), CI et activation des notebooks,
-de la documentation et le choix `coding_agent` : `codex` (défaut), `claude` ou
-`none`. Une seule CLI est installée par projet. Python 3.12 est le défaut minimum.
+de la documentation et le choix `coding_agent` (Codex par défaut) :
+
+```text
+1. codex  — OpenAI Codex uniquement
+2. claude — Claude Code uniquement
+3. both   — les deux CLI, au choix dans le même clone
+4. custom — sandbox isolée sans harness préinstallé
+5. none   — aucune infrastructure agent
+```
+
+Python 3.12 est le défaut minimum. Le nom de variable Cruft reste inchangé.
 Les noms simples comme `Flood Extent` donnent `flood-extent` / `flood_extent` ;
 les slugs complexes ou accentués doivent être ajustés à l’invite en ASCII.
 
@@ -158,6 +167,43 @@ Les ports agent de `.env` sont des préférences : une collision sélectionne
 automatiquement un port localhost libre, sans arrêter un autre projet. Les
 ports effectifs sont conservés dans `.agent/state.json` et affichés par
 `make agent-status`, puis réutilisés au redémarrage lorsqu'ils restent libres.
+
+Avec `both`, les CLI partagent le conteneur, le clone et l'environnement Python,
+mais leurs volumes d'authentification restent séparés. Définissez
+`AGENT_DEFAULT_PROVIDER=codex` ou `claude` dans `.env`, ou utilisez directement
+`make agent-codex`, `make agent-claude`, `make agent-login-codex` et
+`make agent-login-claude`. Le template ne lance jamais les deux automatiquement ;
+évitez les modifications/commits concurrents sur ce clone commun.
+
+Avec `custom`, commencez par `make agent-check`, `make agent-start`, puis
+`make agent-shell`. La sandbox contient l'outillage de développement, sans
+harness IA. Le chemin durable recommandé consiste à éditer
+`containers/agent-custom-install.sh` (no-op initial, exécuté non-root au build),
+configurer `CUSTOM_AGENT_COMMAND` et éventuellement `CUSTOM_AGENT_ARGS` dans
+`.env`, puis `make agent-rebuild` et `make agent`. Sans commande, `make agent`
+démarre la sandbox et affiche une instruction claire pour la configurer.
+
+Le build installe dans `/opt/agent-tools`, devant `.local/bin` dans le PATH,
+pour qu'un volume utilisateur ancien ne masque pas les nouvelles versions.
+Le prefix npm runtime est `.local` ; les volumes nommés `.local` et `.config`
+préservent l'exploration/configuration mais ne couvrent pas tous les harnesses.
+Ne montez jamais le HOME hôte pour persister un dossier de credentials spécifique.
+Les arguments custom sont passés comme argv, sans eval ni shell hôte. Ne mettez
+pas de token dans les arguments ou dans le script de build.
+
+Lors d'un changement de profil Cruft, par exemple :
+
+```bash
+uvx cruft update --variables-to-update '{"coding_agent":"both"}'
+```
+
+un ancien état incompatible est refusé. `make agent-clean` peut arrêter/nettoyer
+l'ancienne stack sans effacer ses volumes. Préservez tous les commits/changements
+du clone, archivez `.agent` hors du checkout, puis reconstruisez et démarrez la
+nouvelle session. Les volumes Codex/Claude conservent leurs noms lors du passage
+à both, donc leurs authentifications restent récupérables. Les gardes Git restent
+actives : commitez la recette avant la première session ; si le HEAD principal
+change pendant une session, conservez/appliquez son travail avant de l'archiver.
 La stack agent sélectionne automatiquement `podman-compose` (à installer sur
 l'hôte) ; le dev container garde son choix de provider. Une erreur de session
 systemd WSL déjà activée se traite d'abord par `wsl --shutdown` depuis Windows,

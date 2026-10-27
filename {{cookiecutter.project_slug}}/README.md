@@ -54,16 +54,32 @@ must be writable by container UID 1000; use Podman's keep-id mapping otherwise.
 {% endif %}
 {% if cookiecutter.coding_agent != 'none' %}
 
-Selected coding agent: **{{ 'Codex' if cookiecutter.coding_agent == 'codex' else 'Claude Code' }}**.
+Agent profile: **{{ cookiecutter.coding_agent }}**.
 Install Podman rootless and `podman-compose` on the host, then:
 
 ```bash
 make agent-check
+{% if cookiecutter.coding_agent == 'custom' %}
+make agent-start
+make agent-shell
+{% else %}
 make agent-login
 make agent
+{% endif %}
 ```
 
-The CLI runs non-root in an independent clone with a dedicated credential volume.
+The sandbox runs non-root in an independent clone. Provider credentials use
+separate named volumes; custom persists `.local` tools and `.config`.
+{% if cookiecutter.coding_agent == 'both' %}
+`AGENT_DEFAULT_PROVIDER=codex` selects the default. Use `make agent-codex` or
+`make agent-claude` and their `agent-login-codex` / `agent-login-claude` targets.
+Both use the same workspace; avoid simultaneous edits by two interactive agents.
+{% elif cookiecutter.coding_agent == 'custom' %}
+No harness is preinstalled. Customize `containers/agent-custom-install.sh`, set
+`CUSTOM_AGENT_COMMAND` (optional `CUSTOM_AGENT_ARGS`) and run `make agent-rebuild`.
+Without a command, `make agent` explains how to open/configure the ready sandbox.
+Use CONTRIBUTING.md and the project guides as instructions for your chosen tool.
+{% endif %}
 Agent ports in `.env` are preferences: collisions select free localhost ports
 automatically. Run `make agent-status` for actual URLs; mappings are saved in
 `.agent/state.json` and reused when available on restart.
@@ -71,8 +87,8 @@ The primary checkout must be clean. Review with `make agent-diff`, test with
 `make agent-test`, commit inside the agent, stop it, then `make agent-apply`.
 Nothing is pushed. `make agent-clean` preserves the clone and credential volume.
 
-The container is the security boundary: the selected CLI's internal approval/permission layer
-is disabled there for autonomous development. Outbound Internet is enabled;
+The container is the security boundary. Official harnesses run with their internal
+approval/permission restrictions bypassed inside it; custom tools retain their own behavior. Outbound Internet is enabled;
 all committed files provided to the clone are readable by the agent. Do not
 commit secrets. Host HOME, engine sockets and the primary checkout are never mounted.
 {% if cookiecutter.enable_docs == 'yes' %}

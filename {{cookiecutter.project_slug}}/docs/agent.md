@@ -1,8 +1,8 @@
 # Coding agent
 
-Selected provider: **{{ 'Codex' if cookiecutter.coding_agent == 'codex' else 'Claude Code' }}**.
-The same rootless Podman sandbox and Git recovery workflow serves both choices.
-Only the selected CLI is installed. See [security](agent-security.md) and
+Selected profile: **{{ cookiecutter.coding_agent }}**.
+All enabled profiles share one rootless Podman sandbox, clone and Git recovery workflow.
+`both` installs Codex and Claude Code; `custom` installs no coding harness. See [security](agent-security.md) and
 [Podman setup](podman.md) for the common boundary and host prerequisites.
 
 ## First launch and authentication
@@ -10,8 +10,13 @@ Only the selected CLI is installed. See [security](agent-security.md) and
 ```bash
 make init
 make agent-check
+{% if cookiecutter.coding_agent == 'custom' %}
+make agent-start
+make agent-shell
+{% else %}
 make agent-login
 make agent
+{% endif %}
 ```
 
 The agent stack explicitly uses the installed `podman-compose` provider;
@@ -20,9 +25,9 @@ it missing. Development Compose selection remains independent.
 Check validates the rootless engine, selected provider/config, independent Git
 repository/base and CLI when the image exists. Before the first build, it
 reports CLI verification as pending; start builds and verifies it.
-{% if cookiecutter.coding_agent == 'codex' %}
+{% if cookiecutter.coding_agent in ['codex', 'both'] %}
 
-`make agent-login` runs `codex login --device-auth` inside the container.
+`{{ 'make agent-login-codex' if cookiecutter.coding_agent == 'both' else 'make agent-login' }}` runs `codex login --device-auth` inside the container.
 Open the displayed URL in your host browser, sign in with ChatGPT, and enter
 the one-time code. Enable device-code login in your ChatGPT security/workspace
 settings if required. No OAuth port forwarding is added. The pinned CLI's
@@ -35,9 +40,10 @@ The host's real Codex directory is never mounted.
 
 Official references: [Codex CLI](https://learn.chatgpt.com/docs/cli),
 [ChatGPT/Codex authentication](https://learn.chatgpt.com/docs/auth).
-{% else %}
+{% endif %}
+{% if cookiecutter.coding_agent in ['claude', 'both'] %}
 
-`make agent-login` runs `claude auth login` inside the container. For an
+`{{ 'make agent-login-claude' if cookiecutter.coding_agent == 'both' else 'make agent-login' }}` runs `claude auth login` inside the container. For an
 individual claude.ai subscription, follow the standard subscription sign-in.
 In WSL2, SSH or containers the browser may not reach the local callback:
 copy the displayed login URL (press `c` when offered), open it in the host
@@ -59,6 +65,86 @@ Official references: [Claude Code setup](https://code.claude.com/docs/en/setup),
 {% endif %}
 
 ## Lifecycle and persistence
+
+{% if cookiecutter.coding_agent == 'both' %}
+### Both: one clone, two harnesses
+
+```bash
+make agent-login-codex
+make agent-login-claude
+make agent-codex
+# Exit Codex before switching:
+make agent-claude
+```
+
+`make agent` and `make agent-login` use `AGENT_DEFAULT_PROVIDER=codex` from
+`.env`; set it to `claude` to change the default. Switching commands never
+creates another clone, Python environment or container. The two credential
+volumes remain independent; reconnecting one provider does not delete the other.
+
+The template does not launch both automatically or serialize interactive work.
+Running two interactive agents concurrently in the shared clone can cause
+overlapping edits, Git conflicts and concurrent commits. Prefer sequential use.
+Both instruction files are generated from one common source and have identical rules.
+{% endif %}
+{% if cookiecutter.coding_agent == 'custom' %}
+### Custom: reproducible harness installation
+
+`custom` means “I want an isolated agent sandbox but will choose/install the
+coding harness myself.” `none` means “I do not want agent infrastructure.”
+Custom contains Python, uv, Git, curl, Make, Bash/Zsh, CA certificates, build
+tools and shared Node/npm, but no Codex or Claude CLI. No harness-specific
+instruction file is generated; use CONTRIBUTING.md and the project guides and
+integrate those conventions with your chosen tool. This is not a universal
+instruction-file standard.
+
+For quick exploration, install tools in `make agent-shell` as the non-root
+user. npm's runtime prefix is `/home/agent/.local`, on PATH. Installations in
+the container's writable filesystem can disappear on recreation. The `.local`
+and `.config` named volumes persist useful user tools/configuration, but do not
+cover all harness storage layouts.
+
+For durable installs, edit `containers/agent-custom-install.sh` on the host.
+It is a no-op initially and runs **as agent** during the image build. Install
+version-pinned packages or binaries there. Build-time npm uses `/opt/agent-tools`;
+standalone binaries should go in `/opt/agent-tools/bin`. This image-owned path
+is ahead of `.local/bin` and is not masked by a stale tools volume on rebuild.
+
+```bash
+# Example inside containers/agent-custom-install.sh:
+npm install -g your-harness-package@an-exact-version
+```
+
+Configure `.env`, without storing tokens in command arguments:
+
+```dotenv
+CUSTOM_AGENT_COMMAND=your-harness
+CUSTOM_AGENT_ARGS=--option "value with spaces"
+```
+
+Command and arguments are split into argv; no host shell, eval, environment
+expansion, pipelines or redirections are interpreted. Do not quote the entire
+command+arguments as one executable name. Secrets must use an appropriate
+credential store or explicitly reviewed runtime injection, not command arguments.
+
+Commit the build recipe before the first sandbox session, then:
+
+```bash
+make agent-rebuild
+make agent
+```
+
+Rebuild stops this project's stack, rebuilds its image and keeps the clone and
+volumes. The next start recreates the container. If a session already exists,
+preserve/apply its work and archive it after cleaning when the primary HEAD
+changes; the unchanged-base guard remains mandatory. Never silently reset a
+clone to pick up a host commit. Empty CUSTOM_AGENT_COMMAND starts the sandbox
+and explains `make agent-shell` rather than pretending a harness is available.
+
+Some harnesses store credentials in a specific directory under HOME. Add a
+dedicated named volume for `/home/agent/.my-harness` if needed; never mount the
+host HOME or host `.config`. Do not embed credentials in the install script.
+{% endif %}
 
 ### Ports across projects
 
@@ -91,15 +177,20 @@ is needed for this noninteractive lifecycle check.
 Use `agent-start`, `agent-shell`, `agent-status`, `agent-logs`, `agent-test`,
 `agent-stop` and `agent-clean` through Make. Stop/clean preserve the workspace
 and configuration volume. Clean removes the Compose stack, not authentication.
-Provider metadata is stored outside the clone in `.agent/state.json`; a
-different provider's session is rejected. Legacy sessions without this field
-are treated as Codex sessions. Review and archive them before changing providers.
+Profile metadata is stored outside the clone in `.agent/state.json`, with
+`default_provider` for both. Legacy `provider` metadata is recognized for
+single-provider sessions (a missing provider means Codex). A different profile
+is rejected. To change profiles, run `make agent-clean` (also supported for an
+old-profile session), retain all unmerged work, then archive `.agent` outside
+the checkout and rebuild/start. Credential volumes are never removed; existing
+Codex/Claude volume names stay unchanged when switching to both.
 
 Before recovery, commit in the clone, run `make agent-diff` and
 `make agent-test`, stop the sandbox and run `make agent-apply`.
 The primary checkout must be clean and compatible with the saved base.
 No hard reset or push is performed.
 
+{% if cookiecutter.coding_agent != 'custom' %}
 ## Manual account persistence validation
 
 Real authentication is deliberately not automated by pytest. On the host:
@@ -112,3 +203,4 @@ Real authentication is deliberately not automated by pytest. On the host:
 
 Do not include codes, auth-file contents or tokens in logs/issues. Automated
 runtime tests use a non-secret volume sentinel, never a real account.
+{% endif %}

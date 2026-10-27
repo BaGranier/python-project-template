@@ -29,7 +29,7 @@ for key, choices in {
     "ci_provider": {"github", "gitlab", "none"},
     "enable_notebooks": {"yes", "no"},
     "enable_docs": {"yes", "no"},
-    "coding_agent": {"codex", "claude", "none"},
+    "coding_agent": {"codex", "claude", "both", "custom", "none"},
 }.items():
     if context[key] not in choices:
         fail(f"unknown {key}: {context[key]}")

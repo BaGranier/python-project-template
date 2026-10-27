@@ -66,11 +66,27 @@ dev-logs: ## Show development logs
 {% if cookiecutter.coding_agent != 'none' %}
 AGENT_PYTHON := $(shell cat .python-version)
 AGENT := uv run --no-project --python $(AGENT_PYTHON) python scripts/agent.py
-.PHONY: agent agent-check agent-login agent-start agent-shell agent-stop agent-status agent-logs agent-diff agent-test agent-apply agent-clean
-agent: ## Start/resume the sandbox and open the selected coding agent
+.PHONY: agent agent-check agent-rebuild agent-start agent-shell agent-stop agent-status agent-logs agent-diff agent-test agent-apply agent-clean
+agent: ## Start sandbox and launch harness (custom: explain setup if unconfigured)
 	$(AGENT) run
-agent-login: ## Start/resume and authenticate interactively inside the sandbox
+agent-rebuild: ## Stop this stack and rebuild its image; preserve clone and volumes
+	$(AGENT) rebuild
+{% if cookiecutter.coding_agent != 'custom' %}
+.PHONY: agent-login
+agent-login: ## Start/resume and authenticate the default provider interactively
 	$(AGENT) login
+{% endif %}
+{% if cookiecutter.coding_agent == 'both' %}
+.PHONY: agent-codex agent-claude agent-login-codex agent-login-claude
+agent-codex: ## Open Codex in the shared sandbox
+	$(AGENT) run --provider codex
+agent-claude: ## Open Claude Code in the shared sandbox
+	$(AGENT) run --provider claude
+agent-login-codex: ## Authenticate Codex in its dedicated volume
+	$(AGENT) login --provider codex
+agent-login-claude: ## Authenticate Claude Code in its dedicated volume
+	$(AGENT) login --provider claude
+{% endif %}
 agent-check: ## Validate Podman rootless, Compose, ports and workspace
 	$(AGENT) check
 agent-start: ## Start/resume and synchronize the sandbox

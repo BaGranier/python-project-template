@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -24,9 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".agent"
 WORKSPACE = STATE_DIR / "workspace"
 STATE = STATE_DIR / "state.json"
-PROVIDER = "{{ cookiecutter.coding_agent }}"
+PROFILE = "{{ cookiecutter.coding_agent }}"
 IMAGE = "localhost/{{ cookiecutter.project_slug }}-agent:template-v2-{{ cookiecutter.coding_agent }}"
-VOLUME = "{{ cookiecutter.project_slug }}-agent-{{ cookiecutter.coding_agent }}-home"
 
 
 @dataclass(frozen=True)
@@ -38,20 +38,24 @@ class CodingAgent:
     launch: tuple[str, ...]
 
 
-{% if cookiecutter.coding_agent == 'codex' %}AGENT = CodingAgent(
+AGENTS: dict[str, CodingAgent] = {}
+
+{% if cookiecutter.coding_agent in ['codex', 'both'] %}AGENTS["codex"] = CodingAgent(
     "Codex",
     "codex",
     "/home/agent/.codex",
     ("codex", "login", "--device-auth"),
     ("codex", "--dangerously-bypass-approvals-and-sandbox"),
 )
-{% else %}AGENT = CodingAgent(
+{% endif %}{% if cookiecutter.coding_agent in ['claude', 'both'] %}AGENTS["claude"] = CodingAgent(
     "Claude Code",
     "claude",
     "/home/agent/.claude",
     ("claude", "auth", "login"),
     ("claude", "--dangerously-skip-permissions"),
 )
+{% endif %}PERSISTENT_PATHS = {name: agent.config_dir for name, agent in AGENTS.items()}
+{% if cookiecutter.coding_agent == 'custom' %}PERSISTENT_PATHS.update(tools="/home/agent/.local", config="/home/agent/.config")
 {% endif %}
 
 PORTS = {
@@ -73,8 +77,60 @@ class AgentState(TypedDict):
     workspace: str
     created: str
     provider: str
+    profile: NotRequired[str]
+    default_provider: NotRequired[str]
     ports: NotRequired[dict[str, int]]
     preferred_ports: NotRequired[dict[str, int]]
+
+
+def setting(key: str, default: str = "") -> str:
+    if key in os.environ:
+        return os.environ[key]
+    path = ROOT / ".env"
+    value = default
+    if path.exists():
+        for line in path.read_text().splitlines():
+            name, sep, candidate = line.partition("=")
+            if sep and name.strip() == key:
+                value = candidate.strip()
+    return value
+
+
+def default_provider() -> str:
+    if PROFILE != "both":
+        return PROFILE
+    value = setting("AGENT_DEFAULT_PROVIDER", "codex")
+    if value not in AGENTS:
+        raise ValueError("AGENT_DEFAULT_PROVIDER must be codex or claude for profile both.")
+    return value
+
+
+def selected_agent(provider: str | None = None) -> CodingAgent | None:
+    choice = provider or default_provider()
+    if choice == "custom" and PROFILE == "custom":
+        return None
+    if choice not in AGENTS:
+        raise ValueError(f"Harness {choice!r} is not installed by profile {PROFILE!r}.")
+    return AGENTS[choice]
+
+
+def custom_command() -> tuple[str, ...]:
+    # Parse argv only: never expand shell syntax or execute anything on the host.
+    command = shlex.split(setting("CUSTOM_AGENT_COMMAND"))
+    args = shlex.split(setting("CUSTOM_AGENT_ARGS"))
+    if not command and args:
+        raise ValueError("Set CUSTOM_AGENT_COMMAND before CUSTOM_AGENT_ARGS.")
+    return tuple([*command, *args])
+
+
+def report_profile() -> None:
+    print(f"Agent profile: {PROFILE}")
+    print("Official harnesses: " + (", ".join(agent.name for agent in AGENTS.values()) or "none"))
+    if PROFILE == "custom":
+        print("Custom harness command: " + ("configured" if custom_command() else "not configured"))
+    for name, path in PERSISTENT_PATHS.items():
+        suffix = f"{name}-home" if name in AGENTS else name
+        print(f"Persistent volume: {{ cookiecutter.project_slug }}-agent-{suffix} -> {path}")
 
 
 def run(
@@ -146,16 +202,20 @@ def clean_repository(path: Path) -> None:
         raise ValueError(f"Uncommitted changes in {path}. Commit or stash before continuing.")
 
 
-def read_state() -> AgentState:
+def read_state(*, allow_profile_mismatch: bool = False) -> AgentState:
     if STATE.is_symlink() or WORKSPACE.is_symlink() or STATE_DIR.is_symlink():
         raise ValueError("Agent paths must not be symbolic links.")
     result: AgentState = json.loads(STATE.read_text())
-    # Pre-provider sessions were always Codex. Never reuse one for another CLI.
+    # Old sessions used provider to mean the entire installed profile.
     result.setdefault("provider", "codex")
-    if result["provider"] != PROVIDER:
+    result.setdefault("profile", result["provider"])
+    if result["provider"] != result["profile"] or (
+        result["profile"] != PROFILE and not allow_profile_mismatch
+    ):
         raise ValueError(
-            "Agent session provider differs from this project. Stop/archive the "
-            "old session before starting a session for the selected provider."
+            "Agent session profile/provider differs from this project. Run make agent-clean "
+            "(credential volumes are preserved), review/archive .agent outside the checkout, "
+            "then make agent-rebuild and make agent-start. Retain all unmerged work."
         )
     for key in ("ports", "preferred_ports"):
         values = result.get(key, {})
@@ -169,8 +229,8 @@ def read_state() -> AgentState:
     return result
 
 
-def state() -> AgentState:
-    result = read_state()
+def state(*, allow_profile_mismatch: bool = False) -> AgentState:
+    result = read_state(allow_profile_mismatch=allow_profile_mismatch)
     git_dir = WORKSPACE / ".git"
     if result.get("workspace") != str(WORKSPACE) or not git_dir.is_dir():
         raise ValueError("Invalid agent workspace; expected an independent .git directory.")
@@ -238,6 +298,8 @@ def prepare() -> AgentState:
                 "Primary HEAD changed since session creation. Review/apply or archive "
                 ".agent after stopping the sandbox before starting another session."
             )
+        if PROFILE == "both":
+            result["default_provider"] = default_provider()
         STATE.write_text(json.dumps(result, indent=2) + "\n")
         return result
     if WORKSPACE.exists():
@@ -260,8 +322,11 @@ def prepare() -> AgentState:
         "branch": branch,
         "workspace": str(WORKSPACE),
         "created": stamp,
-        "provider": PROVIDER,
+        "provider": PROFILE,
+        "profile": PROFILE,
     }
+    if PROFILE == "both":
+        result["default_provider"] = default_provider()
     STATE.write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -283,20 +348,13 @@ def environment(*, preferred: bool = False) -> dict[str, str]:
             "SSH_AUTH_SOCK",
         }
     }
-    values: dict[str, str] = {}
-    env_file = ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            key, sep, value = line.partition("=")
-            if sep and key.strip() in PORTS:
-                values[key.strip()] = value.strip()
     for key, default in PORTS.items():
-        value = os.environ.get(key, values.get(key, str(default)))
+        value = setting(key, str(default))
         if not value.isdecimal() or not 1024 <= int(value) <= 65535:
             raise ValueError(f"{key} must be an unprivileged port (1024..65535).")
         env[key] = value
     if not preferred and STATE.exists():
-        effective = read_state().get("ports", {})
+        effective = read_state(allow_profile_mismatch=True).get("ports", {})
         for key in PORTS:
             if service_name(key) in effective:
                 env[key] = str(effective[service_name(key)])
@@ -475,7 +533,7 @@ def running_containers() -> bool:
     return any(container["State"]["Running"] for container in containers)
 
 
-def check() -> None:
+def check(*, inspect_image: bool = True) -> None:
     if not shutil.which("podman"):
         raise ValueError(
             "Podman missing. Install Podman and configure rootless execution: "
@@ -492,7 +550,9 @@ def check() -> None:
         raise ValueError(
             "podman-compose is unavailable. Install it on the host; see docs/podman.md."
         )
-    print(f"Coding agent: {AGENT.name}\nPodman: available\nRootless: true")
+    report_profile()
+    default_provider()
+    print("Podman: available\nRootless: true")
     print(f"Compose provider: {provider}")
     run([provider, "--version"], env=environment())
     base = validate_repository()
@@ -503,30 +563,53 @@ def check() -> None:
     if not (ROOT / "containers/Containerfile").is_file():
         raise ValueError("Containerfile missing; image cannot be built.")
     compose("config", capture=True)
-    print(f"Agent CLI: {AGENT.cli}\nCredentials volume: {VOLUME}")
+    print("Agent CLIs: " + (", ".join(AGENTS) or "none (custom sandbox)"))
     print(f"Git repository: valid\nAgent base commit: {base}")
+    if not inspect_image:
+        return
     present = subprocess.run(["podman", "image", "exists", IMAGE], check=False)
     if present.returncode == 0:
-        version = run(
-            [
-                "podman",
-                "run",
-                "--rm",
-                "--user",
-                "1000:1000",
-                "--cap-drop=ALL",
-                "--security-opt=no-new-privileges",
-                IMAGE,
-                AGENT.cli,
-                "--version",
-            ],
-            capture=True,
-        )
-        print(f"Agent CLI version: {version}\nAgent environment ready.")
+        probe = [
+            "podman",
+            "run",
+            "--rm",
+            "--user",
+            "1000:1000",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            IMAGE,
+        ]
+        for agent in AGENTS.values():
+            version = run([*probe, agent.cli, "--version"], capture=True)
+            print(f"{agent.name} version: {version}")
+        if not AGENTS:
+            run([*probe, "uv", "--version"])
+            configured = custom_command()
+            if configured:
+                run(
+                    [
+                        *probe,
+                        "python",
+                        "-c",
+                        "import shutil, sys; sys.exit(0 if shutil.which(sys.argv[1]) else 1)",
+                        configured[0],
+                    ]
+                )
+            else:
+                print("Custom sandbox: no harness command configured; use make agent-shell.")
+        print("Agent environment ready.")
     elif present.returncode == 1:
-        print("Image not built: CLI verification pending make agent-start.")
+        print("Image not built: verification pending make agent-start.")
     else:
         raise ValueError("Podman could not inspect the selected agent image.")
+
+
+def rebuild() -> None:
+    check(inspect_image=False)
+    if agent_container() is not None:
+        compose("stop")
+    compose("build")
+    print("Agent image rebuilt; clone and volumes preserved. Run make agent-start or make agent.")
 
 
 def start() -> None:
@@ -543,7 +626,8 @@ def start() -> None:
         compose("stop")
         raise ValueError("Sandbox must execute as a non-root user.")
     compose("exec", "-T", "agent", "uv", "sync", "--locked")
-    compose("exec", "-T", "agent", AGENT.cli, "--version")
+    for agent in AGENTS.values():
+        compose("exec", "-T", "agent", agent.cli, "--version")
     compose("exec", "-T", "agent", "node", "--version")
     compose("exec", "-T", "agent", "npm", "--version")
 
@@ -623,7 +707,9 @@ def status() -> None:
             indent=2,
         )
     )
-    print(f"Coding agent: {AGENT.name}\nAgent configuration volume: {VOLUME}")
+    report_profile()
+    if PROFILE == "both":
+        print(f"Default provider: {default_provider()}")
     print("Published services:" if running else "Last published services (currently stopped):")
     for name, port in result.get("ports", {}).items():
         print(f"{name.title()}: http://127.0.0.1:{port}")
@@ -650,6 +736,7 @@ def main() -> None:
         choices=[
             "check",
             "start",
+            "rebuild",
             "run",
             "login",
             "shell",
@@ -662,11 +749,27 @@ def main() -> None:
             "clean",
         ],
     )
-    command = parser.parse_args().command
+    parser.add_argument("--provider", choices=["codex", "claude"])
+    options = parser.parse_args()
+    command = options.command
     try:
+        agent = None
+        argv: tuple[str, ...] = ()
+        if options.provider and command not in {"run", "login"}:
+            raise ValueError("--provider is only supported for run/login.")
+        if command in {"run", "login"}:
+            agent = selected_agent(options.provider)
+            if PROFILE == "custom":
+                if command == "login":
+                    raise ValueError(
+                        "Custom authentication is harness-specific; use make agent-shell."
+                    )
+                argv = custom_command()
         with locked():
             if command == "check":
                 check()
+            elif command == "rebuild":
+                rebuild()
             elif command in {"start", "run", "login"}:
                 start()
             elif command in {"shell", "test"}:
@@ -674,7 +777,7 @@ def main() -> None:
                 args = ["bash"] if command == "shell" else ["make", "check"]
                 compose("exec", *([] if command == "shell" else ["-T"]), "agent", *args)
             elif command in {"stop", "clean", "logs"}:
-                state()
+                state(allow_profile_mismatch=command in {"stop", "clean"})
                 compose({"stop": "stop", "clean": "down", "logs": "logs"}[command])
                 if command == "clean":
                     print("Clone and persistent volumes preserved. No credentials deleted.")
@@ -687,9 +790,22 @@ def main() -> None:
         # Release the host lifecycle lock during the interactive session so a
         # second terminal can inspect status/diff or stop the sandbox.
         if command == "run":
-            compose("exec", "agent", *AGENT.launch)
+            if agent is not None:
+                compose("exec", "agent", *agent.launch)
+            elif argv:
+                compose("exec", *([] if sys.stdin.isatty() else ["-T"]), "agent", *argv)
+            else:
+                print(
+                    "Custom agent sandbox is ready, but no harness command is configured.\n\n"
+                    "Open the sandbox:\n\n    make agent-shell\n\n"
+                    "or configure a harness command and rebuild the agent image."
+                )
         elif command == "login":
-            compose("exec", "agent", *AGENT.login)
+            assert agent is not None
+            compose("exec", "agent", *agent.login)
+    except subprocess.CalledProcessError as exc:
+        # argv can contain custom CLI arguments; never echo them in wrapper errors.
+        sys.exit(f"Agent command failed with exit code {exc.returncode}; see command output above.")
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as exc:
         sys.exit(f"Agent: {exc}")
 

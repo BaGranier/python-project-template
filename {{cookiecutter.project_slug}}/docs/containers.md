@@ -5,7 +5,9 @@ Start with the [Podman rootless installation and diagnostics guide](podman.md),
 including the user socket, Compose smoke test and WSL2 troubleshooting.
 {% endif %}
 
-The shared Containerfile provides base → dev and, when enabled, base → agent.
+The shared Containerfile provides base → dev and, when enabled, base → agent-base
+→ agent. The generic agent-base adds shared Node/npm and user tool paths, without
+any AI harness. The final agent stage installs the selected profile.
 Python's image follows `.python-version` at generation time; change both on a
 Python upgrade. uv and the selected CLI versions are pinned; OS package revisions and base
 tags can change. For stricter supply-chain reproducibility, resolve and pin
@@ -29,7 +31,8 @@ must listen on 0.0.0.0 so Podman's port forwarding reaches them.
 The agent always uses rootless Podman regardless of the human development runtime.
 See [security and lifecycle](agent-security.md). Agent image rebuilds happen
 on the host: stop the sandbox, review Containerfile changes, then use
-`PODMAN_COMPOSE_PROVIDER="$(command -v podman-compose)" AGENT_WORKSPACE="$PWD/.agent/workspace" podman compose --env-file .env -f containers/compose.agent.yaml build`.
+`make agent-rebuild` stops this stack and rebuilds the image, preserving the clone
+and all named volumes. The next start recreates the container.
 Apply Containerfile changes to the primary checkout before building; agent code
 cannot command the host engine. Restart/recreate the stack after rebuilding.
 

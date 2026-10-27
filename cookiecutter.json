@@ -26,6 +26,8 @@
   "coding_agent": [
     "codex",
     "claude",
+    "both",
+    "custom",
     "none"
   ]
 }
