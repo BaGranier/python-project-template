@@ -4,7 +4,7 @@ Install uv, Git and Make; run `make init` once, then `make shell`.
 Use `make setup` to synchronize an existing development environment; it never
 creates a Git repository or commit. Configure your Git identity yourself.
 Use bash/zsh on Linux or WSL2. The child shell preserves the environment and
-exits normally with `exit`; startup files are skipped to keep PATH predictable.
+exits normally with `exit`; normal Bash/Zsh startup files and existing Oh My Zsh are loaded.
 
 Add/remove dependencies with `uv add` / `uv remove` (use `--group` for tooling).
 Commit the resulting uv.lock. Use `make format`, focused tests, then `make check`

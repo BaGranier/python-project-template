@@ -15,14 +15,43 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".agent"
 WORKSPACE = STATE_DIR / "workspace"
 STATE = STATE_DIR / "state.json"
-IMAGE = "localhost/{{ cookiecutter.project_slug }}-agent:template-v1"
-VOLUME = "{{ cookiecutter.project_slug }}-agent-codex-home"
+PROVIDER = "{{ cookiecutter.coding_agent }}"
+IMAGE = "localhost/{{ cookiecutter.project_slug }}-agent:template-v2-{{ cookiecutter.coding_agent }}"
+VOLUME = "{{ cookiecutter.project_slug }}-agent-{{ cookiecutter.coding_agent }}-home"
+
+
+@dataclass(frozen=True)
+class CodingAgent:
+    name: str
+    cli: str
+    config_dir: str
+    login: tuple[str, ...]
+    launch: tuple[str, ...]
+
+
+{% if cookiecutter.coding_agent == 'codex' %}AGENT = CodingAgent(
+    "Codex",
+    "codex",
+    "/home/agent/.codex",
+    ("codex", "login", "--device-auth"),
+    ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+)
+{% else %}AGENT = CodingAgent(
+    "Claude Code",
+    "claude",
+    "/home/agent/.claude",
+    ("claude", "auth", "login"),
+    ("claude", "--dangerously-skip-permissions"),
+)
+{% endif %}
+
 PORTS = {
     "AGENT_APP_PORT": 18000,
 {% if cookiecutter.enable_notebooks == 'yes' %}    "AGENT_JUPYTER_PORT": 18888,
@@ -34,9 +63,35 @@ def run(
     args: list[str], cwd: Path = ROOT, capture: bool = False, env: dict[str, str] | None = None
 ) -> str:
     result = subprocess.run(
-        args, cwd=cwd, env=env, check=True, text=True, stdout=subprocess.PIPE if capture else None
+        args,
+        cwd=cwd,
+        env=env,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
     )
+    if capture and result.stderr:
+        if args[0] == "podman":
+            diagnose_wsl(result.stderr)
+        else:
+            print(result.stderr, file=sys.stderr, end="")
+    result.check_returncode()
     return result.stdout.strip() if capture else ""
+
+
+def diagnose_wsl(message: str) -> None:
+    print(message, file=sys.stderr, end="" if message.endswith("\n") else "\n")
+    if any(
+        text in message.lower()
+        for text in ("no systemd user session", "cgroupfs", "connect to bus")
+    ):
+        print(
+            "Warning: Podman may fall back from systemd cgroups to cgroupfs. "
+            "Execution may still work. If systemd is already enabled, first run "
+            "wsl --shutdown from Windows, reopen WSL and retest. See docs/podman.md.",
+            file=sys.stderr,
+        )
 
 
 def git(path: Path, *args: str, capture: bool = True) -> str:
@@ -77,6 +132,13 @@ def state() -> dict[str, str]:
     if STATE.is_symlink() or WORKSPACE.is_symlink() or STATE_DIR.is_symlink():
         raise ValueError("Agent paths must not be symbolic links.")
     result: dict[str, str] = json.loads(STATE.read_text())
+    # Pre-provider sessions were always Codex. Never reuse one for another CLI.
+    result.setdefault("provider", "codex")
+    if result["provider"] != PROVIDER:
+        raise ValueError(
+            "Agent session provider differs from this project. Stop/archive the "
+            "old session before starting a session for the selected provider."
+        )
     git_dir = WORKSPACE / ".git"
     if result.get("workspace") != str(WORKSPACE) or not git_dir.is_dir():
         raise ValueError("Invalid agent workspace; expected an independent .git directory.")
@@ -93,7 +155,7 @@ def state() -> dict[str, str]:
     return result
 
 
-def prepare() -> dict[str, str]:
+def validate_repository() -> str:
     detected = subprocess.run(
         ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
         capture_output=True,
@@ -129,6 +191,11 @@ def prepare() -> dict[str, str]:
         raise ValueError(
             "The secure agent requires at least one commit. Run make init, then make agent."
         )
+    return head.stdout.strip()
+
+
+def prepare() -> dict[str, str]:
+    validate_repository()
     clean_repository(ROOT)
     if git(ROOT, "check-ignore", ".agent/workspace") != ".agent/workspace":
         raise ValueError(".agent/ must be ignored by the primary repository.")
@@ -139,6 +206,7 @@ def prepare() -> dict[str, str]:
                 "Primary HEAD changed since session creation. Review/apply or archive "
                 ".agent after stopping the sandbox before starting another session."
             )
+        STATE.write_text(json.dumps(result, indent=2) + "\n")
         return result
     if WORKSPACE.exists():
         raise ValueError("Workspace exists without state. Inspect/archive .agent manually.")
@@ -155,7 +223,13 @@ def prepare() -> dict[str, str]:
         )
         if value.returncode == 0:
             git(WORKSPACE, "config", key, value.stdout.strip())
-    result = {"base": base, "branch": branch, "workspace": str(WORKSPACE), "created": stamp}
+    result = {
+        "base": base,
+        "branch": branch,
+        "workspace": str(WORKSPACE),
+        "created": stamp,
+        "provider": PROVIDER,
+    }
     STATE.write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -175,7 +249,6 @@ def environment() -> dict[str, str]:
             "TERM",
             "LANG",
             "SSH_AUTH_SOCK",
-            "PODMAN_COMPOSE_PROVIDER",
         }
     }
     values: dict[str, str] = {}
@@ -193,10 +266,17 @@ def environment() -> dict[str, str]:
     if len({env[key] for key in PORTS}) != len(PORTS):
         raise ValueError("Agent published ports must be distinct.")
     env["AGENT_WORKSPACE"] = str(WORKSPACE)
+    provider = shutil.which("podman-compose")
+    if provider:
+        env["PODMAN_COMPOSE_PROVIDER"] = provider
     return env
 
 
 def compose(*args: str, capture: bool = False) -> str:
+    if not shutil.which("podman-compose"):
+        raise ValueError(
+            "podman-compose is unavailable. Install it on the host; see docs/podman.md."
+        )
     return run(
         [
             "podman",
@@ -232,7 +312,15 @@ def check() -> None:
             "Rootless Podman required. Check /etc/subuid, /etc/subgid, "
             "newuidmap/newgidmap and podman info; no automatic sudo repair."
         )
-    run(["podman", "compose", "version"], env=environment())
+    provider = shutil.which("podman-compose")
+    if not provider:
+        raise ValueError(
+            "podman-compose is unavailable. Install it on the host; see docs/podman.md."
+        )
+    print(f"Coding agent: {AGENT.name}\nPodman: available\nRootless: true")
+    print(f"Compose provider: {provider}")
+    run([provider, "--version"], env=environment())
+    base = validate_repository()
     if STATE.exists():
         state()
     elif WORKSPACE.exists():
@@ -240,7 +328,30 @@ def check() -> None:
     if not (ROOT / "containers/Containerfile").is_file():
         raise ValueError("Containerfile missing; image cannot be built.")
     compose("config", capture=True)
-    print("Podman rootless and Compose available; image will be built on start if absent.")
+    print(f"Agent CLI: {AGENT.cli}\nCredentials volume: {VOLUME}")
+    print(f"Git repository: valid\nAgent base commit: {base}")
+    present = subprocess.run(["podman", "image", "exists", IMAGE], check=False)
+    if present.returncode == 0:
+        version = run(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "--user",
+                "1000:1000",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                IMAGE,
+                AGENT.cli,
+                "--version",
+            ],
+            capture=True,
+        )
+        print(f"Agent CLI version: {version}\nAgent environment ready.")
+    elif present.returncode == 1:
+        print("Image not built: CLI verification pending make agent-start.")
+    else:
+        raise ValueError("Podman could not inspect the selected agent image.")
 
 
 def start() -> None:
@@ -262,7 +373,9 @@ def start() -> None:
         compose("stop")
         raise ValueError("Sandbox must execute as a non-root user.")
     compose("exec", "-T", "agent", "uv", "sync", "--locked")
-    compose("exec", "-T", "agent", "codex", "--version")
+    compose("exec", "-T", "agent", AGENT.cli, "--version")
+    compose("exec", "-T", "agent", "node", "--version")
+    compose("exec", "-T", "agent", "npm", "--version")
 
 
 def diff() -> None:
@@ -325,7 +438,7 @@ def status() -> None:
     result = state()
     print("Runtime: Podman rootless")
     print(json.dumps(result, indent=2))
-    print(f"Codex home volume: {VOLUME}")
+    print(f"Coding agent: {AGENT.name}\nAgent configuration volume: {VOLUME}")
     env = environment()
     for key in PORTS:
         print(f"{key}: 127.0.0.1:{env[key]}")
@@ -351,6 +464,7 @@ def main() -> None:
             "check",
             "start",
             "run",
+            "login",
             "shell",
             "stop",
             "status",
@@ -366,7 +480,7 @@ def main() -> None:
         with locked():
             if command == "check":
                 check()
-            elif command in {"start", "run"}:
+            elif command in {"start", "run", "login"}:
                 start()
             elif command in {"shell", "test"}:
                 state()
@@ -386,7 +500,9 @@ def main() -> None:
         # Release the host lifecycle lock during the interactive session so a
         # second terminal can inspect status/diff or stop the sandbox.
         if command == "run":
-            compose("exec", "agent", "codex", "--dangerously-bypass-approvals-and-sandbox")
+            compose("exec", "agent", *AGENT.launch)
+        elif command == "login":
+            compose("exec", "agent", *AGENT.login)
     except (ValueError, OSError, subprocess.SubprocessError, KeyError) as exc:
         sys.exit(f"Agent: {exc}")
 

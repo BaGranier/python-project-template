@@ -24,7 +24,7 @@ hooks and the first commit. `make setup` only synchronizes environment/hooks.
 {% if cookiecutter.enable_docs == 'yes' %}
 `docs/`: versioned wiki and ADRs.
 {% endif %}
-{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.coding_agent != 'none' %}
 `containers/`: shared image definition and enabled Compose stacks.
 {% endif %}
 
@@ -35,7 +35,7 @@ and the relevant code. Run targeted tests, then `make check` when appropriate.
 Never report tests as green unless actually executed. Preserve unrelated changes.
 Do not push without request or use destructive Git commands. Create clean local
 commits when the ticket asks for them. Never delete data via routine cleanup.
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 
 ## Agent environment
 

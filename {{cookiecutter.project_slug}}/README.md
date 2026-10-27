@@ -21,7 +21,9 @@ or synchronizes the environment and hooks; it never initializes or commits Git.
 The template's ignored `generated/` directory is for disposable smoke tests,
 not the recommended location for your real project.
 
-Use `exit` to leave the activated child shell. uv remains directly available:
+The interactive child shell loads your normal Bash/Zsh startup files, including
+existing Oh My Zsh. It prepares VIRTUAL_ENV and PATH without changing your HOME.
+Use `exit` to return to the parent shell. uv remains directly available:
 `uv add pandas`, `uv remove pandas`, `uv sync`, `uv run pytest`, `uv tree`, `uv build`.
 Commit pyproject.toml, uv.lock and .python-version together.
 
@@ -50,22 +52,28 @@ Reproducible development uses {{ cookiecutter.dev_container_runtime }} Compose:
 The container has its own uv environment. For Docker on Linux, the checkout
 must be writable by container UID 1000; use Podman's keep-id mapping otherwise.
 {% endif %}
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 
-Secure agent: install/configure **Podman rootless** and a Compose provider
-(`podman-compose` or Docker Compose as a provider for Podman). After `make init`,
-run `make agent-check` and `make agent`.
-Codex runs as non-root in an independent clone, with dedicated authentication
-storage. First sign-in may require `codex login --device-auth` in `make agent-shell`.
+Selected coding agent: **{{ 'Codex' if cookiecutter.coding_agent == 'codex' else 'Claude Code' }}**.
+Install Podman rootless and `podman-compose` on the host, then:
+
+```bash
+make agent-check
+make agent-login
+make agent
+```
+
+The CLI runs non-root in an independent clone with a dedicated credential volume.
 The primary checkout must be clean. Review with `make agent-diff`, test with
 `make agent-test`, commit inside the agent, stop it, then `make agent-apply`.
 Nothing is pushed. `make agent-clean` preserves the clone and credential volume.
 
-The container is the security boundary: Codex's internal approval/sandbox layer
+The container is the security boundary: the selected CLI's internal approval/permission layer
 is disabled there for autonomous development. Outbound Internet is enabled;
 all committed files provided to the clone are readable by the agent. Do not
 commit secrets. Host HOME, engine sockets and the primary checkout are never mounted.
 {% if cookiecutter.enable_docs == 'yes' %}
+See [agent workflow](docs/agent.md) for authentication and persistence.
 See [agent security](docs/agent-security.md) for the threat model and limitations.
 See [Podman setup](docs/podman.md) for rootless installation, socket and diagnostics.
 {% endif %}

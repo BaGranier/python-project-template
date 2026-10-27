@@ -15,6 +15,12 @@ site/
 .ipynb_checkpoints/
 *.ipynb
 .agent/
+{% if cookiecutter.coding_agent == 'codex' %}
+.codex/
+{% elif cookiecutter.coding_agent == 'claude' %}
+.claude.json
+.claude/
+{% endif %}
 data/**/*
 !data/**/
 !data/**/README.md

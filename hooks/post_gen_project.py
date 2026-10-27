@@ -28,16 +28,19 @@ if context["ci_provider"] != "github":
     remove(".github")
 if context["ci_provider"] != "gitlab":
     remove(".gitlab-ci.yml")
-if context["enable_agent"] == "no":
+if context["coding_agent"] == "none":
     remove("scripts/agent.py")
     remove("containers/compose.agent.yaml")
     remove("docs/agent-security.md")
+    remove("docs/agent.md")
+    remove("AGENTS.md")
+    remove("CLAUDE.md")
 if context["dev_container_runtime"] == "none":
     remove("containers/compose.yaml")
-if context["dev_container_runtime"] == "none" and context["enable_agent"] == "no":
+if context["dev_container_runtime"] == "none" and context["coding_agent"] == "none":
     remove("containers")
     remove("docs/containers.md")
-if context["dev_container_runtime"] != "podman" and context["enable_agent"] == "no":
+if context["dev_container_runtime"] != "podman" and context["coding_agent"] == "none":
     remove("docs/podman.md")
 # Conditional Jinja blocks can leave blank endings or whitespace when a value
 # is empty. Ship text already compliant with the generated pre-commit hooks.

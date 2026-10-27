@@ -34,11 +34,12 @@ when absent and installs pre-commit when this project has its own Git repository
 It never initializes Git or creates a commit. Package `author_name` is independent
 of the user's Git identity. Real projects belong beside the template, not in
 its disposable ignored `generated/` directory.
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 
-After initialization, use `make agent-check`, then `make agent`.
+After initialization, use `make agent-check`, then `make agent-login` and `make agent`.
 For noninteractive validation use `make agent-start`, `make agent-status`,
 and `make agent-test`. Read [Podman setup](podman.md) first.
 {% endif %}
 
-Use `exit` to leave the child shell. Its startup files are skipped intentionally.
+Use `exit` to leave the child shell. Normal Bash/Zsh startup files and existing Oh My Zsh are loaded; the child
+receives the project virtual environment. The parent shell is unchanged.

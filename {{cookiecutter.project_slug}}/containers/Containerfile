@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates build-essential make curl bash zsh \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /bin/bash agent \
-    && mkdir -p /opt/venv /home/agent/.cache/uv /home/agent/.codex /workspace \
+    && mkdir -p /opt/venv /home/agent/.cache/uv /workspace \
     && chown -R agent:agent /opt/venv /home/agent /workspace
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_CACHE_DIR=/home/agent/.cache/uv \
@@ -16,21 +16,46 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 WORKDIR /workspace
 
 FROM base AS dev
+{% if cookiecutter.dev_container_runtime != 'none' %}
+ARG OH_MY_ZSH_COMMIT=d2b7f557cceaddb16ba89bbf8200d8a8df35c4d8
+RUN git init /opt/oh-my-zsh \
+    && git -C /opt/oh-my-zsh remote add origin https://github.com/ohmyzsh/ohmyzsh.git \
+    && git -C /opt/oh-my-zsh fetch --depth=1 origin ${OH_MY_ZSH_COMMIT} \
+    && git -C /opt/oh-my-zsh checkout --detach FETCH_HEAD \
+    && printf '%s\n' 'export ZSH=/opt/oh-my-zsh' 'ZSH_THEME="robbyrussell"' \
+       'plugins=(git)' 'zstyle ":omz:update" mode disabled' 'source "$ZSH/oh-my-zsh.sh"' \
+       > /home/agent/.zshrc \
+    && chown agent:agent /home/agent/.zshrc
+ENV SHELL=/usr/bin/zsh
+{% endif %}
 USER agent
 CMD ["sleep", "infinity"]
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 
 FROM node:22.22.0-bookworm-slim AS node
 FROM base AS agent
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
-# Official package, stable npm dist-tag verified during template implementation.
+{% if cookiecutter.coding_agent == 'codex' %}
 ARG CODEX_VERSION=0.164.0
 RUN npm install --global @openai/codex@${CODEX_VERSION} \
     && npm cache clean --force \
     && codex --version
 ENV CODEX_HOME=/home/agent/.codex
+RUN mkdir -p "$CODEX_HOME" \
+    && printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml" \
+    && chown -R agent:agent "$CODEX_HOME"
+{% else %}
+ARG CLAUDE_CODE_VERSION=2.1.311
+RUN npm install --global @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force \
+    && claude --version
+ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
+    DISABLE_AUTOUPDATER=1
+RUN mkdir -p "$CLAUDE_CONFIG_DIR" && chown -R agent:agent "$CLAUDE_CONFIG_DIR"
+{% endif %}
+RUN node --version && npm --version
 USER agent
 CMD ["sleep", "infinity"]
 {% endif %}

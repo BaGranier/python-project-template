@@ -15,18 +15,24 @@ def shell_environment(root: Path, shell: str) -> tuple[str, dict[str, str]]:
         raise ValueError("Virtual environment missing; run make setup first.")
     env = dict(os.environ)
     env["VIRTUAL_ENV"] = str(venv)
-    env["PATH"] = str(venv / "bin") + os.pathsep + env.get("PATH", "")
+    old_venv = os.environ.get("VIRTUAL_ENV")
+    excluded = {str(venv / "bin")}
+    if old_venv:
+        excluded.add(str(Path(old_venv) / "bin"))
+    entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry not in excluded]
+    env["PATH"] = os.pathsep.join([str(venv / "bin"), *entries])
     env.pop("PYTHONHOME", None)
     return executable, env
 
 
 def main() -> None:
     try:
-        executable, env = shell_environment(Path.cwd(), os.environ.get("SHELL", "/bin/bash"))
+        shell = os.environ.get("SHELL") or shutil.which("bash") or "zsh"
+        executable, env = shell_environment(Path.cwd(), shell)
     except ValueError as exc:
         sys.exit(str(exc))
-    # A clean child avoids user startup files resetting PATH or VIRTUAL_ENV.
-    flags = ["--norc", "--noprofile", "-i"] if Path(executable).name == "bash" else ["-f", "-i"]
+    # Normal startup files load existing aliases, prompt, plugins and completions.
+    flags = ["-i"]
     print(f"Entering {executable} with {env['VIRTUAL_ENV']}; use exit to return.", flush=True)
     os.execve(executable, [executable, *flags], env)
 

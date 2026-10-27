@@ -1,7 +1,7 @@
 name: {{ cookiecutter.project_slug }}-agent
 services:
   agent:
-    image: localhost/{{ cookiecutter.project_slug }}-agent:template-v1
+    image: localhost/{{ cookiecutter.project_slug }}-agent:template-v2-{{ cookiecutter.coding_agent }}
     build:
       context: ..
       dockerfile: containers/Containerfile
@@ -17,7 +17,7 @@ services:
       - ${AGENT_WORKSPACE:?run make agent-start}:/workspace:Z
       - agent-venv:/opt/venv
       - agent-cache:/home/agent/.cache/uv
-      - agent-codex-home:/home/agent/.codex
+      - agent-{{ cookiecutter.coding_agent }}-home:/home/agent/.{{ cookiecutter.coding_agent }}
     ports:
       - "127.0.0.1:${AGENT_APP_PORT:-18000}:8000"
 {% if cookiecutter.enable_notebooks == 'yes' %}
@@ -31,5 +31,5 @@ services:
 volumes:
   agent-venv:
   agent-cache:
-  agent-codex-home:
-    name: {{ cookiecutter.project_slug }}-agent-codex-home
+  agent-{{ cookiecutter.coding_agent }}-home:
+    name: {{ cookiecutter.project_slug }}-agent-{{ cookiecutter.coding_agent }}-home

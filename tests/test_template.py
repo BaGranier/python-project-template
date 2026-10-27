@@ -50,6 +50,7 @@ def load_module(path: Path, name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -88,15 +89,15 @@ def test_default_structure(default_project: Path) -> None:
     [
         {"dev_container_runtime": "docker"},
         {"dev_container_runtime": "none"},
-        {"enable_agent": "no"},
-        {"dev_container_runtime": "docker", "enable_agent": "no"},
+        {"coding_agent": "none"},
+        {"dev_container_runtime": "docker", "coding_agent": "none"},
         {"enable_notebooks": "no"},
         {"enable_docs": "no"},
         {"ci_provider": "gitlab"},
         {"ci_provider": "none"},
         {
             "dev_container_runtime": "none",
-            "enable_agent": "no",
+            "coding_agent": "none",
             "enable_docs": "no",
             "enable_notebooks": "no",
             "ci_provider": "none",
@@ -105,7 +106,7 @@ def test_default_structure(default_project: Path) -> None:
 )
 def test_option_matrix(tmp_path: Path, options: dict[str, str]) -> None:
     project = generate(tmp_path, **options)
-    agent = options.get("enable_agent", "yes") == "yes"
+    agent = options.get("coding_agent", "codex") != "none"
     docs = options.get("enable_docs", "yes") == "yes"
     notebooks = options.get("enable_notebooks", "yes") == "yes"
     runtime = options.get("dev_container_runtime", "podman")
@@ -204,19 +205,47 @@ def test_jupytext(default_project: Path) -> None:
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
 def test_shell_environment(
-    default_project: Path, shell: str, monkeypatch: pytest.MonkeyPatch
+    default_project: Path, shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     if not shutil.which(shell):
         pytest.skip(f"{shell} unavailable")
     command(default_project, "uv", "sync")
     helper = load_module(default_project / "scripts/shell.py", "shell_helper")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ZDOTDIR", str(tmp_path))
+    sentinel = tmp_path / (".zshrc" if shell == "zsh" else ".bashrc")
+    sentinel.write_text('export TEMPLATE_RC_LOADED=1\nalias template_alias="echo alias-loaded"\n')
     monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
     executable, env = helper.shell_environment(default_project, shell)
     assert env["VIRTUAL_ENV"] == str(default_project / ".venv")
     assert env["PATH"].split(os.pathsep)[0] == str(default_project / ".venv/bin")
-    flags = ["--norc", "--noprofile"] if shell == "bash" else ["-f"]
+    flags = ["-i"]
     result = command(default_project, executable, *flags, "-c", "command -v python", env=env)
     assert result.strip() == str(default_project / ".venv/bin/python")
+    assert (
+        command(
+            default_project, executable, *flags, "-c", 'echo "$TEMPLATE_RC_LOADED"', env=env
+        ).strip()
+        == "1"
+    )
+    assert "alias-loaded" in command(
+        default_project, executable, *flags, "-c", "alias template_alias", env=env
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    _, nested = helper.shell_environment(default_project, shell)
+    assert nested["PATH"].split(os.pathsep).count(str(default_project / ".venv/bin")) == 1
+    actual = subprocess.run(
+        [sys.executable, str(default_project / "scripts/shell.py")],
+        cwd=default_project,
+        input='echo "RC=$TEMPLATE_RC_LOADED"\nexit\n',
+        env={**env, "SHELL": executable},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert actual.returncode == 0 and "RC=1" in actual.stdout
+    assert sentinel.read_text().startswith("export TEMPLATE_RC_LOADED=1")
     with pytest.raises(ValueError, match="bash or zsh"):
         helper.shell_environment(default_project, "sh")
 
@@ -372,8 +401,11 @@ def test_demo_generation_and_explicit_cleanup(tmp_path: Path) -> None:
     assert (neighbor / "keep.txt").read_text() == "preserve"
 
 
-def test_git_isolation_and_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = generate(tmp_path)
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_git_isolation_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    project = generate(tmp_path, coding_agent=provider)
     initialize(project)
     helper = configure_agent(project)
     monkeypatch.setattr(helper, "running_containers", lambda: False)
@@ -524,7 +556,8 @@ def test_bootstrap_documentation(default_project: Path) -> None:
     assert "jetable" in (ROOT / "README.md").read_text()
 
 
-def test_cruft_create_check_diff(tmp_path: Path) -> None:
+@pytest.mark.parametrize("provider", ["codex", "claude", "none"])
+def test_cruft_create_check_diff(tmp_path: Path, provider: str) -> None:
     source = tmp_path / "template"
     source.mkdir()
     for name in ("cookiecutter.json", "README.md"):
@@ -541,6 +574,8 @@ def test_cruft_create_check_diff(tmp_path: Path) -> None:
         "create",
         str(source),
         "--no-input",
+        "--extra-context",
+        json.dumps({"coding_agent": provider}),
         "--output-dir",
         str(destination),
     )
@@ -583,6 +618,174 @@ def dynamic_ports(prefix: str) -> dict[str, str]:
             sock.bind(("127.0.0.1", 0))
             ports[f"{prefix}_{name}_PORT"] = str(sock.getsockname()[1])
         return ports
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude", "none"])
+def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
+    project = generate(tmp_path, coding_agent=provider)
+    containerfile = (project / "containers/Containerfile").read_text()
+    help_text = command(project, "make", "help")
+    instructions = {"codex": "AGENTS.md", "claude": "CLAUDE.md"}
+    for choice, name in instructions.items():
+        assert (project / name).exists() == (provider == choice)
+    if provider == "none":
+        assert not (project / "scripts/agent.py").exists()
+        assert not (project / "containers/compose.agent.yaml").exists()
+        assert not (project / "docs/agent.md").exists()
+        assert "agent-" not in help_text
+        assert "@openai" not in containerfile and "@anthropic" not in containerfile
+        assert "agent-check" not in (project / "docs/podman.md").read_text()
+    else:
+        assert "agent-login" in help_text
+        config = yaml.safe_load((project / "containers/compose.agent.yaml").read_text())
+        service = config["services"]["agent"]
+        assert service["user"] == "1000:1000"
+        assert service["cap_drop"] == ["ALL"]
+        assert "no-new-privileges:true" in service["security_opt"]
+        assert not service.get("privileged") and service.get("network_mode") != "host"
+        assert all(port.startswith("127.0.0.1:") for port in service["ports"])
+        assert f"agent-{provider}-home:/home/agent/.{provider}" in service["volumes"]
+        assert config["volumes"][f"agent-{provider}-home"]["name"].endswith(
+            f"agent-{provider}-home"
+        )
+        selected, other = (
+            ("@openai/codex", "@anthropic-ai/claude-code")
+            if provider == "codex"
+            else ("@anthropic-ai/claude-code", "@openai/codex")
+        )
+        assert selected in containerfile and other not in containerfile
+        assert "FROM node:22." in containerfile
+        helper = configure_agent(project)
+        assert helper.AGENT.login == (
+            ("codex", "login", "--device-auth")
+            if provider == "codex"
+            else ("claude", "auth", "login")
+        )
+    command(project, "make", "init", env=git_identity_environment(tmp_path))
+    command(project, "make", "check")
+    command(project, "make", "build")
+    command(project, "make", "docs-build")
+
+
+def test_instructions_share_one_source(tmp_path: Path) -> None:
+    codex = generate(tmp_path / "codex", coding_agent="codex")
+    claude = generate(tmp_path / "claude", coding_agent="claude")
+    assert (codex / "AGENTS.md").read_text() == (claude / "CLAUDE.md").read_text()
+    assert "enable_agent" not in json.loads((ROOT / "cookiecutter.json").read_text())
+
+
+def test_provider_state_mismatch(tmp_path: Path) -> None:
+    project = generate(tmp_path)
+    initialize(project)
+    helper = configure_agent(project)
+    saved = helper.prepare()
+    assert saved["provider"] == "codex"
+    saved.pop("provider")
+    helper.STATE.write_text(json.dumps(saved))
+    assert helper.state()["provider"] == "codex"
+    saved["provider"] = "claude"
+    helper.STATE.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match="provider differs"):
+        helper.state()
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_login_and_launch_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    project = generate(tmp_path, coding_agent=provider)
+    helper = configure_agent(project)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(helper, "start", lambda: calls.append(("start",)))
+    monkeypatch.setattr(helper, "compose", lambda *args: calls.append(args))
+    monkeypatch.setattr(sys, "argv", ["agent.py", "login"])
+    helper.main()
+    assert calls == [("start",), ("exec", "agent", *helper.AGENT.login)]
+    calls.clear()
+    monkeypatch.setattr(sys, "argv", ["agent.py", "run"])
+    helper.main()
+    assert calls == [("start",), ("exec", "agent", *helper.AGENT.launch)]
+
+
+def test_compose_selection_and_warning(
+    default_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    helper = configure_agent(default_project)
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda value: "/usr/bin/podman-compose" if value == "podman-compose" else "/usr/bin/podman",
+    )
+    monkeypatch.setenv("PODMAN_COMPOSE_PROVIDER", "/usr/bin/docker-compose")
+    assert helper.environment()["PODMAN_COMPOSE_PROVIDER"] == "/usr/bin/podman-compose"
+    helper.diagnose_wsl("there is no systemd user session available")
+    assert "Warning:" in capsys.readouterr().err
+    monkeypatch.setattr(helper.shutil, "which", lambda _: None)
+    with pytest.raises(ValueError, match="podman-compose is unavailable"):
+        helper.compose("config")
+    docs = (default_project / "docs/podman.md").read_text()
+    section = docs[docs.index("### Podman says there is no systemd user session") :]
+    assert section.index("wsl --shutdown") < section.index("loginctl user-status")
+
+
+@pytest.mark.parametrize("legacy_enabled,provider", [("yes", "codex"), ("no", "none")])
+def test_cruft_legacy_context_upgrade(tmp_path: Path, legacy_enabled: str, provider: str) -> None:
+    # A real old-schema template commit, followed by the current template commit.
+    # Self-contained so CI does not require historical Git objects or a deep checkout.
+    source = tmp_path / "template"
+    source.mkdir()
+    config = json.loads((ROOT / "cookiecutter.json").read_text())
+    config.pop("coding_agent")
+    config["enable_agent"] = ["yes", "no"]
+    (source / "cookiecutter.json").write_text(json.dumps(config))
+    legacy = source / "{{cookiecutter.project_slug}}"
+    legacy.mkdir()
+    (legacy / "README.md").write_text("# {{cookiecutter.project_name}}\n")
+    initialize(source)
+    command(
+        ROOT,
+        sys.executable,
+        "-m",
+        "cruft",
+        "create",
+        str(source),
+        "--no-input",
+        "--extra-context",
+        json.dumps({"enable_agent": legacy_enabled}),
+        "--output-dir",
+        str(tmp_path / "output"),
+    )
+    project = tmp_path / "output/my-python-project"
+    old_context = json.loads((project / ".cruft.json").read_text())["context"]["cookiecutter"]
+    assert old_context["enable_agent"] == legacy_enabled and "coding_agent" not in old_context
+    initialize(project)
+    shutil.rmtree(legacy)
+    shutil.copytree(ROOT / "{{cookiecutter.project_slug}}", legacy)
+    shutil.copytree(ROOT / "hooks", source / "hooks")
+    shutil.copyfile(ROOT / "cookiecutter.json", source / "cookiecutter.json")
+    command(source, "git", "add", ".")
+    command(source, "git", "commit", "-m", "add coding_agent")
+    outdated = subprocess.run(
+        [sys.executable, "-m", "cruft", "check"], cwd=project, capture_output=True, check=False
+    )
+    assert outdated.returncode != 0
+    command(project, sys.executable, "-m", "cruft", "diff")
+    command(
+        project,
+        sys.executable,
+        "-m",
+        "cruft",
+        "update",
+        "--skip-apply-ask",
+        "--variables-to-update",
+        json.dumps({"coding_agent": provider}),
+    )
+    state = json.loads((project / ".cruft.json").read_text())
+    assert state["context"]["cookiecutter"]["coding_agent"] == provider
+    assert (project / "scripts/agent.py").exists() == (provider != "none")
+    assert not list(project.glob("*.rej"))
+    command(project, sys.executable, "-m", "cruft", "check")
+    command(project, "make", "check")
 
 
 @contextmanager
@@ -672,7 +875,10 @@ def test_dev_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         assert command(project, *prefix, "exec", "-T", "dev", "id", "-u").strip() != "0"
 
 
-def test_agent_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_agent_container_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
     if not shutil.which("podman"):
         pytest.skip("Podman unavailable: agent/security/HTTP-port runtime tests not executed")
     info = subprocess.run(
@@ -685,7 +891,10 @@ def test_agent_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     for key, value in dynamic_ports("AGENT").items():
         monkeypatch.setenv(key, value)
     project = generate(
-        tmp_path, project_slug=f"runtime-agent-{uuid4().hex[:12]}", package_name="my_python_project"
+        tmp_path,
+        project_slug=f"runtime-agent-{uuid4().hex[:12]}",
+        package_name="my_python_project",
+        coding_agent=provider,
     )
     command(project, "make", "init", env=git_identity_environment(tmp_path))
     helper = configure_agent(project)
@@ -694,7 +903,17 @@ def test_agent_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         command(project, "make", "agent-start")
         assert helper.compose("exec", "-T", "agent", "id", "-u", capture=True) == "1000"
         helper.compose("exec", "-T", "agent", "make", "check")
-        helper.compose("exec", "-T", "agent", "codex", "--version")
+        helper.compose("exec", "-T", "agent", helper.AGENT.cli, "--version")
+        helper.compose("exec", "-T", "agent", "node", "--version")
+        helper.compose("exec", "-T", "agent", "npm", "--version")
+        config_sentinel = helper.AGENT.config_dir + "/template-test-sentinel"
+        helper.compose("exec", "-T", "agent", "touch", config_sentinel)
+        command(project, "make", "agent-stop")
+        command(project, "make", "agent-start")
+        helper.compose("exec", "-T", "agent", "test", "-f", config_sentinel)
+        command(project, "make", "agent-clean")
+        command(project, "make", "agent-start")
+        helper.compose("exec", "-T", "agent", "test", "-f", config_sentinel)
         ids = helper.compose("ps", "-q", capture=True).splitlines()
         inspection = json.loads(command(project, "podman", "inspect", *ids))[0]
         mounts = inspection["Mounts"]

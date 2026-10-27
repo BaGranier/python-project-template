@@ -1,6 +1,12 @@
 .git
 .venv
 .agent
+{% if cookiecutter.coding_agent == 'codex' %}
+.codex
+{% elif cookiecutter.coding_agent == 'claude' %}
+.claude.json
+.claude
+{% endif %}
 .env
 .env.*
 !.env.example

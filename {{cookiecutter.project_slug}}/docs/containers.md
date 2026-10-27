@@ -1,13 +1,13 @@
 # Containers
 
-{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.coding_agent != 'none' %}
 Start with the [Podman rootless installation and diagnostics guide](podman.md),
 including the user socket, Compose smoke test and WSL2 troubleshooting.
 {% endif %}
 
 The shared Containerfile provides base → dev and, when enabled, base → agent.
 Python's image follows `.python-version` at generation time; change both on a
-Python upgrade. uv and Codex versions are pinned; OS package revisions and base
+Python upgrade. uv and the selected CLI versions are pinned; OS package revisions and base
 tags can change. For stricter supply-chain reproducibility, resolve and pin
 image digests in your deployment environment and rebuild regularly.
 {% if cookiecutter.dev_container_runtime != 'none' %}
@@ -24,12 +24,12 @@ The host `.venv` is never used by uv inside the container, even if visible
 through the human development bind mount. Set ports in `.env` before startup.
 Host bindings default to 127.0.0.1; application servers inside the container
 must listen on 0.0.0.0 so Podman's port forwarding reaches them.
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 
 The agent always uses rootless Podman regardless of the human development runtime.
 See [security and lifecycle](agent-security.md). Agent image rebuilds happen
 on the host: stop the sandbox, review Containerfile changes, then use
-`AGENT_WORKSPACE="$PWD/.agent/workspace" podman compose --env-file .env -f containers/compose.agent.yaml build`.
+`PODMAN_COMPOSE_PROVIDER="$(command -v podman-compose)" AGENT_WORKSPACE="$PWD/.agent/workspace" podman compose --env-file .env -f containers/compose.agent.yaml build`.
 Apply Containerfile changes to the primary checkout before building; agent code
 cannot command the host engine. Restart/recreate the stack after rebuilding.
 
@@ -39,3 +39,8 @@ credentials; connect using the service DNS name from the agent. Do not publish
 database ports unless required, mount host credentials, or expose engine sockets.
 No database service is imposed by this template.
 {% endif %}
+
+The dev image provides Zsh with Oh My Zsh at a pinned commit and a minimal
+robbyrussell/git configuration. It never copies the host HOME or installs at
+shell startup. `make dev-shell` opens Zsh. The agent image has plain Bash/Zsh
+without Oh My Zsh; `make agent-shell` opens Bash and mounts no host shell config.

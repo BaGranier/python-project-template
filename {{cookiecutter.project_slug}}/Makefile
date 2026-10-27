@@ -59,16 +59,18 @@ dev-up: ## Start the development container
 dev-down: ## Stop development containers (preserve volumes)
 	$(COMPOSE) down
 dev-shell: ## Enter the development container
-	$(COMPOSE) exec dev bash
+	$(COMPOSE) exec dev zsh
 dev-logs: ## Show development logs
 	$(COMPOSE) logs
 {% endif %}
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
 AGENT_PYTHON := $(shell cat .python-version)
 AGENT := uv run --no-project --python $(AGENT_PYTHON) python scripts/agent.py
-.PHONY: agent agent-check agent-start agent-shell agent-stop agent-status agent-logs agent-diff agent-test agent-apply agent-clean
-agent: ## Start/resume the isolated sandbox and open Codex
+.PHONY: agent agent-check agent-login agent-start agent-shell agent-stop agent-status agent-logs agent-diff agent-test agent-apply agent-clean
+agent: ## Start/resume the sandbox and open the selected coding agent
 	$(AGENT) run
+agent-login: ## Start/resume and authenticate interactively inside the sandbox
+	$(AGENT) login
 agent-check: ## Validate Podman rootless, Compose, ports and workspace
 	$(AGENT) check
 agent-start: ## Start/resume and synchronize the sandbox

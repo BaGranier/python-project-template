@@ -23,3 +23,23 @@ Set repository/environment permissions according to your organization policy.
 GitLab CI publishes `public/` via Pages on the default branch. Enable Pages in
 the project settings and inspect the deployment URL in Deploy → Pages.
 {% endif %}
+
+## Developer shell
+
+`make shell` opens an interactive child Bash or Zsh, chosen from `$SHELL` (Bash
+fallback when unset). It loads normal user startup files, passes VIRTUAL_ENV
+and prepends the project's environment bin directory without accumulating
+copies on nested launches. No HOME files are written and no plugins downloaded.
+If your custom rc file replaces PATH, preserve the incoming venv bin entry.
+Use `exit` to return to the unchanged parent shell.
+
+### Optional: Oh My Zsh
+
+Existing Oh My Zsh loads through your normal `.zshrc`. It is optional; see the
+[official installation documentation](https://ohmyz.sh/) if you want to install
+it yourself. The template never runs its installer on the host.
+
+On a host with Oh My Zsh, manually verify the usual prompt/aliases after
+`make shell`, then `echo "$VIRTUAL_ENV"`, `which python`, `python --version`.
+Run `make shell` a second time and exit twice: PATH must retain one project bin
+entry and the parent environment must remain unchanged.

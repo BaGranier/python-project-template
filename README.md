@@ -4,9 +4,8 @@ Ce dépôt est le **template maître**, pas une application. Cookiecutter génè
 nouveau dépôt ; Cruft conserve le lien pour les mises à jour futures.
 
 ```bash
-uv tool install cruft
 cd ~/projects
-cruft create ~/python-project-template  # ou l'URL Git du template
+uvx cruft create ~/python-project-template  # ou l'URL Git du template
 cd my-python-project
 make init
 make shell
@@ -17,7 +16,8 @@ Cookiecutter reste utilisable directement :
 `uvx cookiecutter <URL-ou-chemin-du-template>`.
 Les questions couvrent le nom, slug, package, description, auteur, Python,
 runtime de développement (Podman/Docker/aucun), CI et activation des notebooks,
-de la documentation et de l’agent. Python 3.12 est le défaut minimum.
+de la documentation et le choix `coding_agent` : `codex` (défaut), `claude` ou
+`none`. Une seule CLI est installée par projet. Python 3.12 est le défaut minimum.
 Les noms simples comme `Flood Extent` donnent `flood-extent` / `flood_extent` ;
 les slugs complexes ou accentués doivent être ajustés à l’invite en ASCII.
 
@@ -102,7 +102,8 @@ make agent-test
 make agent-stop
 ```
 
-Lancez ensuite `make agent` pour valider manuellement l'interactivité Codex.
+Lancez ensuite `make agent-login` et `make agent` pour valider manuellement
+l'authentification et l'interactivité de la CLI choisie.
 La configuration Podman et les diagnostics sont documentés dans le guide
 `docs/podman.md` des projets générés qui utilisent Podman. Ne montez pas le
 socket hôte dans le bootstrap pour contourner une validation indisponible.
@@ -123,15 +124,54 @@ make check
 Lisez les différences et résolvez les conflits avant de commiter la mise à jour.
 Cookiecutter seul ne crée pas `.cruft.json` ; privilégiez Cruft dès la création.
 
+Migration obligatoire des projets historiques avec `enable_agent` : Cookiecutter
+ignore les anciennes variables supprimées, et Cruft ne convertit pas leur sens.
+**Avant la première mise à jour vers ce template**, sauvegardez/commitez votre
+travail puis choisissez explicitement la valeur correspondant à l'ancien contexte :
+
+```bash
+# ancien enable_agent=yes : conserver Codex
+uvx cruft update --variables-to-update '{"coding_agent":"codex"}'
+# ancien enable_agent=no : conserver l'absence d'agent
+uvx cruft update --variables-to-update '{"coding_agent":"none"}'
+```
+
+Ne lancez pas une mise à jour sans ce choix sur un ancien contexte `no` : le
+nouveau défaut serait Codex. La migration n'est pas transparente ; la suite
+teste de vrais commits de templates avec l'ancien schéma et ces commandes.
+Revoyez le diff proposé, les éventuels conflits et `.cruft.json`, puis exécutez
+les checks. Après migration, `coding_agent` est enregistré et les mises à jour
+suivantes utilisent normalement `cruft check`, `cruft diff` et `cruft update`.
+Arrêtez/archivez une session `.agent/` avant de changer de provider ; un état
+d'un autre provider est refusé. Les anciens états sans provider sont Codex.
+
 La sandbox agent finale utilise toujours **Podman rootless** : clone Git
 indépendant sans hardlinks, utilisateur non-root, aucun socket moteur ni HOME
-hôte, credentials Codex dans un volume dédié et ports liés à localhost.
+hôte, credentials du provider dans un volume dédié et ports liés à localhost.
 Le conteneur de développement humain peut utiliser Podman ou Docker et monte
 son checkout. Les deux usages restent distincts. `make agent` vérifie le
-runtime, exige un checkout propre, démarre le clone et ouvre Codex. L’agent
+runtime, exige un checkout propre, démarre le clone et ouvre la CLI choisie. L’agent
 contrôle son workspace ; l’hôte contrôle la sandbox et récupère volontairement
 les commits par `make agent-apply`. L’accès Internet sortant et la lecture du
 contenu du clone restent permis ; ne fournissez pas de secrets dans le dépôt.
+La stack agent sélectionne automatiquement `podman-compose` (à installer sur
+l'hôte) ; le dev container garde son choix de provider. Une erreur de session
+systemd WSL déjà activée se traite d'abord par `wsl --shutdown` depuis Windows,
+puis réouverture et nouveau diagnostic, avant toute modification système.
+
+Pour chaque variante Codex et Claude, créez un projet séparé avec `uvx cruft create`,
+choisissez le provider, puis `make init`, `make agent-check`, `make agent-login`,
+`make agent`. Arrêtez/redémarrez, puis recréez avec `make agent-clean` suivi de
+`make agent-start` : vérifiez manuellement que l'authentification persiste.
+Les tests automatisés n'utilisent jamais de vraie connexion ; ils vérifient
+une sentinelle dans le volume lorsque Podman est disponible.
+
+`make shell` charge maintenant les RC Bash/Zsh et donc Oh My Zsh déjà installé
+sur l'hôte. Aucun HOME n'est modifié et aucun installateur n'est lancé par cette
+commande. Le PATH de l'environnement reste sans doublon après imbrication.
+L'image dev fournit Oh My Zsh à un commit verrouillé ; l'image agent ne l'ajoute pas.
+Validez manuellement votre prompt, alias, `echo "$VIRTUAL_ENV"` et `which python`,
+puis `exit` pour revenir au shell parent. Voir le guide développement généré.
 
 Références vérifiées lors de l’implémentation :
 
@@ -140,8 +180,9 @@ Références vérifiées lors de l’implémentation :
 - [Installation uv en CI GitHub](https://docs.astral.sh/uv/guides/integration/github/)
 - [Codex CLI officiel](https://learn.chatgpt.com/docs/codex/cli)
 
-Versions critiques : uv/uv_build 0.13.5, package officiel `@openai/codex` 0.164.0
-(version stable vérifiée dans le registre npm). Les tags d’images système et
+Les versions critiques sont centralisées dans les arguments du Containerfile
+(CODEX_VERSION ou CLAUDE_CODE_VERSION, Node partagé, OH_MY_ZSH_COMMIT pour dev).
+Mettez à jour ces pins et reconstruisez pour changer de version. Les tags d’images système et
 paquets apt ne sont pas immuables ; voir la documentation conteneurs générée
 pour le durcissement par digests et la maintenance des versions.
 

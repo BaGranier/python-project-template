@@ -5,9 +5,27 @@
   "description": "",
   "author_name": "Your Name",
   "python_version": "3.12",
-  "dev_container_runtime": ["podman", "docker", "none"],
-  "ci_provider": ["github", "gitlab", "none"],
-  "enable_notebooks": ["yes", "no"],
-  "enable_docs": ["yes", "no"],
-  "enable_agent": ["yes", "no"]
+  "dev_container_runtime": [
+    "podman",
+    "docker",
+    "none"
+  ],
+  "ci_provider": [
+    "github",
+    "gitlab",
+    "none"
+  ],
+  "enable_notebooks": [
+    "yes",
+    "no"
+  ],
+  "enable_docs": [
+    "yes",
+    "no"
+  ],
+  "coding_agent": [
+    "codex",
+    "claude",
+    "none"
+  ]
 }

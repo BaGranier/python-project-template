@@ -1,9 +1,11 @@
-{% raw %}# Podman rootless on Linux and WSL2
+# Podman rootless on Linux and WSL2
 
 Run these commands on the Linux/WSL host, as your normal user. The temporary
 Docker bootstrap container may not have access to host Podman; do not mount
-the host socket into it merely to run tests. The agent always uses Podman
-rootless, independently of the selected human development runtime.
+the host socket into it merely to run tests.
+{% if cookiecutter.coding_agent != 'none' %}
+The agent always uses Podman rootless, independently of the selected human development runtime.
+{% endif %}
 
 ## Installation
 
@@ -48,13 +50,22 @@ do not delete container storage to repair it blindly.
 ```bash
 command -v newuidmap
 command -v newgidmap
-podman info --format '{{.Host.Security.Rootless}}'
+podman info --format '{{ '{{' }}.Host.Security.Rootless{{ '}}' }}'
 ```
 
 Expected rootless result: `true`. Run Podman as your regular user. Do not use
 `sudo podman` for the agent: that selects a different, rootful environment.
 
 ## Rootless socket and Compose provider
+
+{% if cookiecutter.coding_agent != 'none' %}
+The agent helper selects `podman-compose` explicitly and requires it on the
+host (`sudo apt install podman-compose` on supported distributions). This
+provider uses the Podman CLI directly. The human dev stack can still use the
+host's preferred provider. Socket setup below is needed for socket-based
+providers such as docker-compose; the socket is never mounted in the agent.
+
+{% endif %}
 
 With a functioning systemd user session:
 
@@ -153,7 +164,7 @@ echo "=== PODMAN ==="
 podman --version
 echo
 echo "=== ROOTLESS ==="
-podman info --format '{{.Host.Security.Rootless}}'
+podman info --format '{{ '{{' }}.Host.Security.Rootless{{ '}}' }}'
 echo
 echo "=== SOCKET ==="
 systemctl --user is-active podman.socket || true
@@ -181,6 +192,44 @@ podman compose version
 
 ## Troubleshooting
 
+### Podman says there is no systemd user session
+
+Symptoms include `The cgroupv2 manager is set to systemd but there is no systemd
+user session available`, `Failed to connect to bus: No such file or directory`,
+or a missing `/run/user/<uid>/bus`.
+
+First run `ps -p 1 -o comm=`. If it prints `systemd` and `/etc/wsl.conf` already
+contains `[boot]` with `systemd=true`, do not immediately change configuration
+or reinstall systemd. Close relevant WSL shells/processes, then from Windows:
+
+```powershell
+wsl --shutdown
+```
+
+Reopen WSL and retest:
+
+```bash
+ps -p 1 -o comm=
+systemctl --user status
+podman info --format '{{ '{{' }}.Host.Security.Rootless{{ '}}' }}'
+```
+
+If systemd is already enabled but its user session is inconsistent, this full
+WSL shutdown is the first remedy. Only if it persists, inspect:
+
+```bash
+cat /etc/wsl.conf
+echo "$XDG_RUNTIME_DIR"
+loginctl user-status "$USER"
+```
+
+Then continue the diagnostics below. A fallback from systemd cgroups to
+cgroupfs can be a warning while rootless execution still works.
+{% if cookiecutter.coding_agent != 'none' %}
+agent-check does not reject it solely for that warning. Missing rootless execution,
+podman-compose, or the selected CLI in an existing image is a blocking error.
+{% endif %}
+
 | Symptom | Check and remedy |
 | --- | --- |
 | `rootless=false` | Use your regular user, not sudo/root; inspect `podman info` and subordinate IDs. |
@@ -199,4 +248,3 @@ legitimately own this port. Runtime tests must still pass with it running.
 References: [rootless tutorial](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md),
 [socket service](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html),
 [Compose providers](https://docs.podman.io/en/latest/markdown/podman-compose.1.html).
-{% endraw %}

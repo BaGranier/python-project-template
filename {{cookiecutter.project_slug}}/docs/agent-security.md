@@ -12,14 +12,14 @@ This configuration is unsuitable for untrusted repositories containing secrets.
 
 ## Boundary and access
 
-The host starts the stack. Codex runs as UID 1000 without sudo, with all Linux
+The host starts the stack. The selected coding agent runs as UID 1000 without sudo, with all Linux
 capabilities dropped and no-new-privileges. No privileged mode, host network,
 engine socket, host HOME, SSH/GPG/AWS directories or primary Git directory is
 mounted. The sole host bind mount is `.agent/workspace` at `/workspace`.
 It contains an independent clone with its own objects, no hardlinks, no object
 alternates and no origin remote pointing back to the host.
 
-Codex's internal approval/sandbox restrictions are disabled **only inside this
+The selected CLI's internal approval/permission restrictions are disabled **only inside this
 dedicated container**. The container provides the boundary and permits normal
 uv/Git/test/server work without repeatedly asking for host permissions.
 It does not contain a container engine. Rebuilds and service changes are host actions.
@@ -34,15 +34,14 @@ container. `podman info` must report rootless. No helper runs sudo.
 Run `make init` to create an independent repository and initial commit, then
 `make agent-check`. Commit/stash any later changes in the main checkout, then
 `make agent`. Existing clones resume only while primary HEAD equals the saved
-base. State (base, branch, workspace, timestamp) lives in `.agent/state.json`,
+base. State (provider, base, branch, workspace, timestamp) lives in `.agent/state.json`,
 outside the mounted workspace. The branch is `agent/<UTC timestamp>`.
 `make agent` never initializes Git automatically; a parent repository alone
 is insufficient. Use `make setup` for subsequent environment synchronization.
 
-Codex authentication persists in the project-specific named volume
-`{{ cookiecutter.project_slug }}-agent-codex-home`; the real `~/.codex` is never mounted.
-For first sign-in, use Codex interactively, or `make agent-shell` followed by
-`codex login --device-auth`. Never bake keys into images or commit them.
+Authentication uses a project-specific provider volume. See [agent workflow](agent.md)
+for the selected CLI's login and persistent storage. No host credential directory
+is mounted. Never bake keys into images or commit them.
 No API key or host `.env` is automatically forwarded. If needed, explicitly
 pass a runtime variable through a locally reviewed Compose override (and keep
 that file ignored); this grants the agent access to that credential.

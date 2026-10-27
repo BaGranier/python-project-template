@@ -11,13 +11,14 @@ nav:
 {% if cookiecutter.enable_notebooks == 'yes' %}
   - Notebooks: notebooks.md
 {% endif %}
-{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.coding_agent != 'none' %}
   - Containers: containers.md
 {% endif %}
-{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.dev_container_runtime == 'podman' or cookiecutter.coding_agent != 'none' %}
   - Podman setup: podman.md
 {% endif %}
-{% if cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.coding_agent != 'none' %}
+  - Coding agent: agent.md
   - Agent security: agent-security.md
 {% endif %}
   - Decisions: adr/README.md

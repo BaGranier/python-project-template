@@ -8,8 +8,8 @@ may differ from the normalized distribution name.
 `tests/unit/` checks small behavior; `tests/integration/` checks the public entrypoint.
 `configs/` holds non-secret configuration. Real data in `data/` and outputs in
 `artifacts/` remain local and are excluded from image build contexts.
-{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.enable_agent == 'yes' %}
+{% if cookiecutter.dev_container_runtime != 'none' or cookiecutter.coding_agent != 'none' %}
 
-The host, development container and agent use independent environments with
+The host and enabled container environments use independent environments with
 the same Python definition and uv lock. One Containerfile shares OS and tools.
 {% endif %}
