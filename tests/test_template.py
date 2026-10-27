@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import errno
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ import tomllib
 import zipfile
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
@@ -620,6 +622,184 @@ def dynamic_ports(prefix: str) -> dict[str, str]:
         return ports
 
 
+def test_agent_port_reservations(default_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    helper = configure_agent(default_project)
+    preferences = {
+        helper.service_name(key): int(port) for key, port in dynamic_ports("AGENT").items()
+    }
+    with helper.reserve_ports(preferences) as effective:
+        assert effective == preferences
+        for port in effective.values():
+            with socket.socket() as competing:
+                with pytest.raises(OSError) as caught:
+                    competing.bind(("127.0.0.1", port))
+                assert caught.value.errno == errno.EADDRINUSE
+    assert capsys.readouterr().out == ""
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", preferences["app"]))
+        occupied.listen()
+        with helper.reserve_ports(preferences) as effective:
+            assert effective["app"] != preferences["app"]
+            assert effective["jupyter"] == preferences["jupyter"]
+            assert effective["docs"] == preferences["docs"]
+            assert len(set(effective.values())) == 3
+        message = capsys.readouterr().out
+        assert f"Preferred agent port {preferences['app']} is already in use" in message
+
+
+def test_agent_ports_restart_and_changed_preferences(default_project: Path) -> None:
+    helper = configure_agent(default_project)
+    choices = list(dynamic_ports("AGENT").values())
+    preferred, previous, changed = map(int, choices)
+    with helper.reserve_ports({"app": preferred}, {"app": previous}) as effective:
+        assert effective == {"app": previous}
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", previous))
+        with helper.reserve_ports({"app": preferred}, {"app": previous}) as effective:
+            assert effective == {"app": preferred}
+    with helper.reserve_ports({"app": changed}, {"app": previous}, {"app": preferred}) as effective:
+        assert effective == {"app": changed}
+    with helper.reserve_ports(dict.fromkeys(("app", "jupyter", "docs"), preferred)) as effective:
+        assert len(set(effective.values())) == 3
+    # All reservations are released on context exit.
+    for port in effective.values():
+        with socket.socket() as available:
+            available.bind(("127.0.0.1", port))
+
+
+def test_agent_port_selector_propagates_other_errors(
+    default_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = configure_agent(default_project)
+
+    def denied(*args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(helper.socket, "socket", denied)
+    with pytest.raises(PermissionError):
+        with helper.reserve_ports({"app": 18000}):
+            pass
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"app": "18000"},
+        {"app": 0},
+        {"app": True},
+        {"ssh": 18000},
+        {"app": 18000, "docs": 18000},
+    ],
+)
+def test_agent_rejects_invalid_saved_ports(
+    tmp_path: Path,
+    default_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: dict[str, object],
+) -> None:
+    helper = configure_agent(default_project)
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps({"provider": "codex", "ports": invalid}))
+    monkeypatch.setattr(helper, "STATE", state_file)
+    with pytest.raises(ValueError, match="ports"):
+        helper.read_state()
+
+
+@pytest.mark.parametrize("failure", ["address already in use", "network permission denied"])
+def test_agent_start_ports_state_and_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    project = generate(tmp_path)
+    initialize(project)
+    helper = configure_agent(project)
+    session = helper.prepare()
+    preferences = {
+        helper.service_name(key): int(port) for key, port in dynamic_ports("AGENT").items()
+    }
+    for key in helper.PORTS:
+        monkeypatch.setenv(key, str(preferences[helper.service_name(key)]))
+    live: dict[str, object] | None = None
+    attempts: list[dict[str, int]] = []
+    monkeypatch.setattr(helper, "agent_container", lambda: live)
+    with socket.socket() as occupied, socket.socket() as race:
+        occupied.bind(("127.0.0.1", preferences["app"]))
+
+        def fake_compose(
+            *args: str, capture: bool = False, ports: dict[str, int] | None = None
+        ) -> str:
+            nonlocal live
+            if args[0] != "up":
+                return ""
+            assert ports is not None
+            attempts.append(dict(ports))
+            if len(attempts) == 1:
+                race.bind(("127.0.0.1", ports["app"]))
+                raise subprocess.CalledProcessError(125, ["podman"], stderr=failure)
+            live = {
+                "State": {"Running": True},
+                "NetworkSettings": {
+                    "Ports": {
+                        f"{helper.SERVICE_PORTS[name]}/tcp": [
+                            {"HostIp": "127.0.0.1", "HostPort": str(port)}
+                        ]
+                        for name, port in ports.items()
+                    }
+                },
+            }
+            return ""
+
+        monkeypatch.setattr(helper, "compose", fake_compose)
+        if failure != "address already in use":
+            with pytest.raises(subprocess.CalledProcessError):
+                helper.start_stack(session)
+            assert len(attempts) == 1
+            assert "ports" not in json.loads(helper.STATE.read_text())
+            return
+        helper.start_stack(session)
+        assert len(attempts) == 2
+        assert attempts[0]["app"] != attempts[1]["app"]
+        saved = json.loads(helper.STATE.read_text())
+        assert saved["ports"] == attempts[-1]
+        assert saved["preferred_ports"] == preferences
+        assert helper.environment()["AGENT_APP_PORT"] == str(saved["ports"]["app"])
+        assert helper.environment(preferred=True)["AGENT_APP_PORT"] == str(preferences["app"])
+        # Already running: keep actual ports even though they are notionally busy.
+        helper.start_stack(session)
+        assert attempts[-1] == attempts[-2]
+        original_run = helper.run
+
+        def fake_run(args: list[str], **kwargs: object) -> str:
+            if args[0] == "podman":
+                return "rootless=true"
+            result: str = original_run(args, **kwargs)
+            return result
+
+        monkeypatch.setattr(helper, "run", fake_run)
+        capsys.readouterr()
+        helper.status()
+        output = capsys.readouterr().out
+        assert "Agent: running" in output
+        for port in saved["ports"].values():
+            assert f"http://127.0.0.1:{port}" in output
+        assert f"http://127.0.0.1:{preferences['app']}" not in output
+        assert "preferred_ports" not in output
+
+
+def test_published_ports_reject_nonlocal_bind(default_project: Path) -> None:
+    helper = configure_agent(default_project)
+    with pytest.raises(ValueError, match="localhost-only"):
+        helper.published_ports(
+            {
+                "NetworkSettings": {
+                    "Ports": {"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "18000"}]}
+                }
+            }
+        )
+
+
 @pytest.mark.parametrize("provider", ["codex", "claude", "none"])
 def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
     project = generate(tmp_path, coding_agent=provider)
@@ -971,3 +1151,99 @@ def test_agent_container_runtime(
             "1",
             f"http://127.0.0.1:{port}",
         )
+
+
+def test_agent_multi_project_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not shutil.which("podman"):
+        pytest.skip("Podman unavailable: simultaneous multi-project agents not executed")
+    info = subprocess.run(
+        ["podman", "info", "--format", "json"], text=True, capture_output=True, check=False
+    )
+    if info.returncode or not json.loads(info.stdout).get("host", {}).get("security", {}).get(
+        "rootless"
+    ):
+        pytest.skip("Usable rootless Podman unavailable")
+    # Keep the identical user defaults. Even if another host service owns one,
+    # both projects must start through the runtime's automatic allocation.
+    for key in ("AGENT_APP_PORT", "AGENT_JUPYTER_PORT", "AGENT_DOCS_PORT"):
+        monkeypatch.delenv(key, raising=False)
+    projects = [
+        generate(
+            tmp_path,
+            project_slug=f"ports-{name}-{uuid4().hex[:12]}",
+            coding_agent=provider,
+            package_name="my_python_project",
+        )
+        for name, provider in (("a", "codex"), ("b", "claude"))
+    ]
+    for project in projects:
+        command(project, "make", "init", env=git_identity_environment(tmp_path))
+    helpers = [configure_agent(project) for project in projects]
+    effective: list[dict[str, int]] = []
+    with ExitStack() as stack:
+        for helper in helpers:
+            stack.enter_context(runtime_cleanup(partial(helper.compose, "down", "--volumes")))
+        for index, (project, helper) in enumerate(zip(projects, helpers, strict=True)):
+            command(project, "make", "agent-start")
+            container = helper.agent_container()
+            assert container is not None and container["State"]["Running"]
+            ports = helper.published_ports(container)
+            assert ports == json.loads(helper.STATE.read_text())["ports"]
+            effective.append(ports)
+            output = command(project, "make", "agent-status")
+            assert "Agent: running" in output
+            for port in ports.values():
+                assert f"http://127.0.0.1:{port}" in output
+            helper.compose(
+                "exec",
+                "-T",
+                "agent",
+                "uv",
+                "run",
+                "python",
+                "-c",
+                f"from pathlib import Path; Path('identity.txt').write_text('project-{index}')",
+            )
+            helper.compose(
+                "exec",
+                "-d",
+                "agent",
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "http.server",
+                "8000",
+                "--bind",
+                "0.0.0.0",
+            )
+        assert set(effective[0].values()).isdisjoint(effective[1].values())
+        for index, (project, ports) in enumerate(zip(projects, effective, strict=True)):
+            response = command(
+                project,
+                "curl",
+                "--fail",
+                "--retry",
+                "10",
+                "--retry-connrefused",
+                "--retry-delay",
+                "1",
+                f"http://127.0.0.1:{ports['app']}/identity.txt",
+            )
+            assert response == f"project-{index}"
+        command(projects[0], "make", "agent-stop")
+        stopped = helpers[0].agent_container()
+        assert stopped is None or not stopped["State"]["Running"]
+        still_running = helpers[1].agent_container()
+        assert still_running is not None and still_running["State"]["Running"]
+        assert helpers[1].published_ports(still_running) == effective[1]
+        assert (
+            command(
+                projects[1],
+                "curl",
+                "--fail",
+                f"http://127.0.0.1:{effective[1]['app']}/identity.txt",
+            )
+            == "project-1"
+        )
+        assert "Agent: running" in command(projects[1], "make", "agent-status")

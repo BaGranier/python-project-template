@@ -60,6 +60,34 @@ Official references: [Claude Code setup](https://code.claude.com/docs/en/setup),
 
 ## Lifecycle and persistence
 
+### Ports across projects
+
+`AGENT_APP_PORT`, `AGENT_JUPYTER_PORT` and `AGENT_DOCS_PORT` in `.env` are
+preferred localhost ports. Start keeps free preferences and automatically
+selects available alternatives for collisions, without changing `.env` or
+stopping another project. Use `make agent-status` for the actual service URLs;
+do not assume the values in `.env` are currently published.
+
+Effective ports are recorded under `ports` in `.agent/state.json` (`app`,
+`jupyter`, `docs` for enabled services). Restart prefers the previous mapping
+when it is available. Changing a preferred value in `.env` takes priority at
+the next stopped-agent startup. A running agent keeps its current mapping
+until stopped; status reads live Podman publications, including legacy sessions.
+All bindings remain `127.0.0.1`. `agent-stop` releases the ports, while
+`agent-clean` removes only this project's stack and preserves credentials.
+
+Port reservations must be released before Podman binds them. A competing start
+in that handoff window triggers up to three allocation/start attempts;
+unrelated startup errors are reported immediately.
+
+For a manual multi-project smoke test, initialize two projects with different
+slugs and the same default preferences. Run `make agent-start` in each without
+stopping the first, then `make agent-status` in both. Confirm distinct localhost
+URLs. Stop the first and confirm the second still responds. No account login
+is needed for this noninteractive lifecycle check.
+
+### Commands and retained state
+
 Use `agent-start`, `agent-shell`, `agent-status`, `agent-logs`, `agent-test`,
 `agent-stop` and `agent-clean` through Make. Stop/clean preserve the workspace
 and configuration volume. Clean removes the Compose stack, not authentication.

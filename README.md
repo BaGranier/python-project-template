@@ -154,6 +154,10 @@ runtime, exige un checkout propre, démarre le clone et ouvre la CLI choisie. L�
 contrôle son workspace ; l’hôte contrôle la sandbox et récupère volontairement
 les commits par `make agent-apply`. L’accès Internet sortant et la lecture du
 contenu du clone restent permis ; ne fournissez pas de secrets dans le dépôt.
+Les ports agent de `.env` sont des préférences : une collision sélectionne
+automatiquement un port localhost libre, sans arrêter un autre projet. Les
+ports effectifs sont conservés dans `.agent/state.json` et affichés par
+`make agent-status`, puis réutilisés au redémarrage lorsqu'ils restent libres.
 La stack agent sélectionne automatiquement `podman-compose` (à installer sur
 l'hôte) ; le dev container garde son choix de provider. Une erreur de session
 systemd WSL déjà activée se traite d'abord par `wsl --shutdown` depuis Windows,

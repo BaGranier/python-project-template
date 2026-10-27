@@ -48,11 +48,13 @@ that file ignored); this grants the agent access to that credential.
 
 ## Ports and network
 
-Set AGENT_APP_PORT, and the enabled documentation/notebook ports, in `.env`
-before startup. Host bindings are 127.0.0.1 only; container ports are 8000,
+Set preferred AGENT_APP_PORT, and the enabled documentation/notebook ports,
+in `.env` before startup. Occupied preferences fall back automatically to free
+localhost ports; `make agent-status` reports actual URLs and state records them.
+Host bindings are 127.0.0.1 only; container ports are 8000,
 8888 and 8001 as enabled. To test, launch
 `uv run python -m http.server 8000 --bind 0.0.0.0` inside `make agent-shell`,
-then visit `http://127.0.0.1:18000` (or the configured port) on the host.
+then visit the app URL reported by `make agent-status` on the host.
 Inside the container use `curl http://localhost:8000`.
 No rebuild is needed for the preconfigured ports. A normal Compose network
 allows outbound traffic; this is not an egress-filtering firewall.

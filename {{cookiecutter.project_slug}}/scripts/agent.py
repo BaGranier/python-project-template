@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import errno
 import fcntl
 import json
 import os
@@ -14,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, NotRequired, TypedDict
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".agent"
@@ -57,6 +59,22 @@ PORTS = {
 {% if cookiecutter.enable_notebooks == 'yes' %}    "AGENT_JUPYTER_PORT": 18888,
 {% endif %}{% if cookiecutter.enable_docs == 'yes' %}    "AGENT_DOCS_PORT": 18001,
 {% endif %}}
+
+SERVICE_PORTS = {"app": 8000, "jupyter": 8888, "docs": 8001}
+
+
+def service_name(variable: str) -> str:
+    return variable.removeprefix("AGENT_").removesuffix("_PORT").lower()
+
+
+class AgentState(TypedDict):
+    base: str
+    branch: str
+    workspace: str
+    created: str
+    provider: str
+    ports: NotRequired[dict[str, int]]
+    preferred_ports: NotRequired[dict[str, int]]
 
 
 def run(
@@ -128,10 +146,10 @@ def clean_repository(path: Path) -> None:
         raise ValueError(f"Uncommitted changes in {path}. Commit or stash before continuing.")
 
 
-def state() -> dict[str, str]:
+def read_state() -> AgentState:
     if STATE.is_symlink() or WORKSPACE.is_symlink() or STATE_DIR.is_symlink():
         raise ValueError("Agent paths must not be symbolic links.")
-    result: dict[str, str] = json.loads(STATE.read_text())
+    result: AgentState = json.loads(STATE.read_text())
     # Pre-provider sessions were always Codex. Never reuse one for another CLI.
     result.setdefault("provider", "codex")
     if result["provider"] != PROVIDER:
@@ -139,6 +157,20 @@ def state() -> dict[str, str]:
             "Agent session provider differs from this project. Stop/archive the "
             "old session before starting a session for the selected provider."
         )
+    for key in ("ports", "preferred_ports"):
+        values = result.get(key, {})
+        if not isinstance(values, dict) or any(
+            name not in SERVICE_PORTS or type(port) is not int or not 1024 <= port <= 65535
+            for name, port in values.items()
+        ):
+            raise ValueError(f"Invalid {key} in agent state.")
+        if key == "ports" and len(set(values.values())) != len(values):
+            raise ValueError("Effective agent ports must be distinct.")
+    return result
+
+
+def state() -> AgentState:
+    result = read_state()
     git_dir = WORKSPACE / ".git"
     if result.get("workspace") != str(WORKSPACE) or not git_dir.is_dir():
         raise ValueError("Invalid agent workspace; expected an independent .git directory.")
@@ -194,7 +226,7 @@ def validate_repository() -> str:
     return head.stdout.strip()
 
 
-def prepare() -> dict[str, str]:
+def prepare() -> AgentState:
     validate_repository()
     clean_repository(ROOT)
     if git(ROOT, "check-ignore", ".agent/workspace") != ".agent/workspace":
@@ -234,7 +266,7 @@ def prepare() -> dict[str, str]:
     return result
 
 
-def environment() -> dict[str, str]:
+def environment(*, preferred: bool = False) -> dict[str, str]:
     # Do not pass the host environment or .env wholesale to Compose. In
     # particular .env must never redirect AGENT_WORKSPACE or select build files.
     env = {
@@ -263,8 +295,11 @@ def environment() -> dict[str, str]:
         if not value.isdecimal() or not 1024 <= int(value) <= 65535:
             raise ValueError(f"{key} must be an unprivileged port (1024..65535).")
         env[key] = value
-    if len({env[key] for key in PORTS}) != len(PORTS):
-        raise ValueError("Agent published ports must be distinct.")
+    if not preferred and STATE.exists():
+        effective = read_state().get("ports", {})
+        for key in PORTS:
+            if service_name(key) in effective:
+                env[key] = str(effective[service_name(key)])
     env["AGENT_WORKSPACE"] = str(WORKSPACE)
     provider = shutil.which("podman-compose")
     if provider:
@@ -272,11 +307,15 @@ def environment() -> dict[str, str]:
     return env
 
 
-def compose(*args: str, capture: bool = False) -> str:
+def compose(*args: str, capture: bool = False, ports: dict[str, int] | None = None) -> str:
     if not shutil.which("podman-compose"):
         raise ValueError(
             "podman-compose is unavailable. Install it on the host; see docs/podman.md."
         )
+    env = environment()
+    if ports is not None:
+        for key in PORTS:
+            env[key] = str(ports[service_name(key)])
     return run(
         [
             "podman",
@@ -288,8 +327,144 @@ def compose(*args: str, capture: bool = False) -> str:
             *args,
         ],
         capture=capture,
-        env=environment(),
+        env=env,
     )
+
+
+@contextmanager
+def reserve_ports(
+    preferences: dict[str, int],
+    previous: dict[str, int] | None = None,
+    previous_preferences: dict[str, int] | None = None,
+) -> Iterator[dict[str, int]]:
+    """Reserve stable choices first, then ephemeral fallbacks, on loopback only."""
+    previous = previous or {}
+    selected: dict[str, int] = {}
+    busy: set[int] = set()
+    with ExitStack() as stack:
+
+        def reserve(port: int) -> int | None:
+            sock = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError as exc:
+                sock.close()
+                if exc.errno != errno.EADDRINUSE:
+                    raise
+                busy.add(port)
+                return None
+            return int(sock.getsockname()[1])
+
+        for name, preferred in preferences.items():
+            candidates = [preferred]
+            if name in previous and (
+                previous_preferences is None or previous_preferences.get(name) == preferred
+            ):
+                candidates.insert(0, previous[name])
+            for candidate in dict.fromkeys(candidates):
+                port = reserve(candidate)
+                if port is not None:
+                    selected[name] = port
+                    break
+        # Do not consume another service's free preferred port as a fallback.
+        for name, preferred in preferences.items():
+            if name not in selected:
+                port = reserve(0)
+                assert port is not None
+                selected[name] = port
+            if selected[name] != preferred:
+                if preferred in busy:
+                    print(
+                        f"Preferred agent port {preferred} is already in use. "
+                        f"Using {selected[name]} instead.",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"Reusing saved {name} port {selected[name]} (preferred {preferred}).",
+                        flush=True,
+                    )
+        yield selected
+
+
+def agent_container() -> dict[str, Any] | None:
+    identifiers = compose("ps", "-q", capture=True).splitlines()
+    if not identifiers:
+        return None
+    containers = json.loads(run(["podman", "inspect", *identifiers], capture=True))
+    agents = [
+        container
+        for container in containers
+        if container.get("Config", {})
+        .get("Labels", {})
+        .get(
+            "com.docker.compose.service",
+            container.get("Config", {}).get("Labels", {}).get("io.podman.compose.service"),
+        )
+        == "agent"
+    ]
+    if not agents and len(containers) == 1:
+        agents = containers
+    if len(agents) != 1:
+        raise ValueError("Cannot identify the agent container in this project's stack.")
+    result: dict[str, Any] = agents[0]
+    return result
+
+
+def published_ports(container: dict[str, Any]) -> dict[str, int]:
+    bindings = container.get("NetworkSettings", {}).get("Ports", {})
+    result: dict[str, int] = {}
+    for key in PORTS:
+        name = service_name(key)
+        mappings = bindings.get(f"{SERVICE_PORTS[name]}/tcp") or []
+        if len(mappings) != 1 or mappings[0].get("HostIp") != "127.0.0.1":
+            raise ValueError(f"Expected one localhost-only publication for {name}.")
+        port = int(mappings[0]["HostPort"])
+        if not 1024 <= port <= 65535 or port in result.values():
+            raise ValueError("Invalid effective port published by the agent.")
+        result[name] = port
+    return result
+
+
+def start_stack(session: AgentState) -> None:
+    env = environment(preferred=True)
+    preferences = {service_name(key): int(env[key]) for key in PORTS}
+    container = agent_container()
+    if container is not None and container["State"]["Running"]:
+        # Never reallocate a running agent's own busy ports, even for old states.
+        effective = published_ports(container)
+        compose("up", "-d", "--no-build", ports=effective)
+    else:
+        for attempt in range(3):
+            with reserve_ports(
+                preferences, session.get("ports"), session.get("preferred_ports")
+            ) as effective:
+                effective = dict(effective)
+            # Podman must bind these itself. Retry a bind race across projects.
+            try:
+                compose("up", "-d", "--no-build", "--force-recreate", ports=effective, capture=True)
+                break
+            except subprocess.CalledProcessError as exc:
+                message = f"{exc.stderr or ''} {exc.output or ''}".lower()
+                if not any(
+                    text in message
+                    for text in ("address already in use", "port is already allocated")
+                ):
+                    raise
+                if attempt == 2:
+                    raise ValueError(
+                        "Ports changed during startup repeatedly; retry make agent-start."
+                    ) from exc
+                print(
+                    "Port allocation changed during startup; selecting free ports again.",
+                    flush=True,
+                )
+        session["preferred_ports"] = preferences
+    container = agent_container()
+    if container is None or not container["State"]["Running"]:
+        raise ValueError("Agent container did not start. Inspect make agent-logs.")
+    session["ports"] = published_ports(container)
+    STATE.write_text(json.dumps(session, indent=2) + "\n")
 
 
 def running_containers() -> bool:
@@ -356,18 +531,13 @@ def check() -> None:
 
 def start() -> None:
     check()
-    prepare()
-    # Check availability only before initial startup; a resumed stack owns its ports.
-    if not running_containers():
-        for key in PORTS:
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", int(environment()[key])))
+    session = prepare()
     present = subprocess.run(["podman", "image", "exists", IMAGE], check=False)
     if present.returncode == 1:
         compose("build")
     elif present.returncode != 0:
         raise ValueError("Podman could not inspect the agent image.")
-    compose("up", "-d", "--no-build")
+    start_stack(session)
     uid = compose("exec", "-T", "agent", "id", "-u", capture=True)
     if not uid.isdecimal() or int(uid) == 0:
         compose("stop")
@@ -436,12 +606,29 @@ def apply() -> None:
 
 def status() -> None:
     result = state()
+    container = agent_container()
+    running = container is not None and container["State"]["Running"]
+    if running and container is not None:
+        result["ports"] = published_ports(container)
+        STATE.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"Agent: {'running' if running else 'stopped'}")
     print("Runtime: Podman rootless")
-    print(json.dumps(result, indent=2))
+    print(
+        json.dumps(
+            {
+                key: value
+                for key, value in result.items()
+                if key not in {"preferred_ports", "ports"}
+            },
+            indent=2,
+        )
+    )
     print(f"Coding agent: {AGENT.name}\nAgent configuration volume: {VOLUME}")
-    env = environment()
-    for key in PORTS:
-        print(f"{key}: 127.0.0.1:{env[key]}")
+    print("Published services:" if running else "Last published services (currently stopped):")
+    for name, port in result.get("ports", {}).items():
+        print(f"{name.title()}: http://127.0.0.1:{port}")
+    if not result.get("ports"):
+        print("No effective ports recorded; run make agent-start.")
     print(run(["podman", "info", "--format", "rootless={{ '{{' }}.Host.Security.Rootless{{ '}}' }}"], capture=True))
     compose("ps")
 

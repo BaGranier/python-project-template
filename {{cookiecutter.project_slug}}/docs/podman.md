@@ -135,6 +135,10 @@ In another terminal, run `curl http://127.0.0.1:18080`. On WSL2 also open
 `http://localhost:18080` from Windows. Stop the foreground container with Ctrl-C.
 Project ports remain configurable through `.env`; localhost is the default
 host binding. Application servers inside containers must listen on 0.0.0.0.
+{% if cookiecutter.coding_agent != 'none' %}
+Agent values are preferred ports, with automatic collision fallback and
+persistent effective mappings. Use `make agent-status` for current URLs.
+{% endif %}
 Automated template tests allocate distinct ephemeral host ports instead of
 assuming 8000 or other common ports are free. Port selection releases the
 reservation before container startup, so another process can still race it.

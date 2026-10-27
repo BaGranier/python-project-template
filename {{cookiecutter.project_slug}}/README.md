@@ -64,6 +64,9 @@ make agent
 ```
 
 The CLI runs non-root in an independent clone with a dedicated credential volume.
+Agent ports in `.env` are preferences: collisions select free localhost ports
+automatically. Run `make agent-status` for actual URLs; mappings are saved in
+`.agent/state.json` and reused when available on restart.
 The primary checkout must be clean. Review with `make agent-diff`, test with
 `make agent-test`, commit inside the agent, stop it, then `make agent-apply`.
 Nothing is pushed. `make agent-clean` preserves the clone and credential volume.
