@@ -955,6 +955,13 @@ def test_login_and_launch_dispatch(
 ) -> None:
     project = generate(tmp_path, coding_agent=provider)
     helper = configure_agent(project)
+    expected_launch = (
+        ("codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox")
+        if provider == "codex"
+        else ("claude", "--dangerously-skip-permissions")
+    )
+    assert helper.selected_agent().launch == expected_launch
+    assert helper.selected_agent().launch.count("--no-daemon") == (provider == "codex")
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(helper, "start", lambda: calls.append(("start",)))
     monkeypatch.setattr(helper, "compose", lambda *args: calls.append(args))

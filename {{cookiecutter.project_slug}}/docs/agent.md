@@ -27,6 +27,13 @@ repository/base and CLI when the image exists. Before the first build, it
 reports CLI verification as pending; start builds and verifies it.
 {% if cookiecutter.coding_agent in ['codex', 'both'] %}
 
+Codex is launched with `--no-daemon` inside the Podman sandbox. The Codex
+background app-server is unnecessary for this workflow and would otherwise
+require additional process-management utilities in the minimal agent image.
+Its internal sandbox is bypassed with `--dangerously-bypass-approvals-and-sandbox`;
+the rootless, non-root Podman sandbox is the security boundary. Never run this
+command directly on the host checkout outside that sandbox.
+
 `{{ 'make agent-login-codex' if cookiecutter.coding_agent == 'both' else 'make agent-login' }}` runs `codex login --device-auth` inside the container.
 Open the displayed URL in your host browser, sign in with ChatGPT, and enter
 the one-time code. Enable device-code login in your ChatGPT security/workspace

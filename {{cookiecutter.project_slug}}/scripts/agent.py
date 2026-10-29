@@ -45,7 +45,7 @@ AGENTS: dict[str, CodingAgent] = {}
     "codex",
     "/home/agent/.codex",
     ("codex", "login", "--device-auth"),
-    ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+    ("codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"),
 )
 {% endif %}{% if cookiecutter.coding_agent in ['claude', 'both'] %}AGENTS["claude"] = CodingAgent(
     "Claude Code",

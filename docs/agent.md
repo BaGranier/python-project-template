@@ -99,6 +99,15 @@ pinned CLI's device login; Claude uses `claude auth login`. For a remote/contain
 browser callback, follow the CLI's URL/code instructions in the host browser.
 No OAuth port range or host network is opened. No real login runs in pytest.
 
+Codex is launched with `--no-daemon` inside the Podman sandbox. The Codex
+background app-server is unnecessary for this workflow and would otherwise
+require additional process-management utilities in the minimal agent image.
+Both `make agent-codex` and `make agent` with Codex selected use that shared
+provider command. Codex's internal sandbox is bypassed with
+`--dangerously-bypass-approvals-and-sandbox`; the rootless, non-root Podman
+sandbox, with capabilities dropped and no host HOME or engine sockets, is the
+security boundary. Never use that command directly on the host checkout.
+
 `agent-stop` stops the container. `agent-clean` removes the stack/network,
 preserving clone, state and all named volumes, including authentication.
 `agent-rebuild` stops and rebuilds the image, preserving work and credentials.

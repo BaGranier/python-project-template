@@ -46,6 +46,11 @@ def test_master_profiles_and_compose(
     helper = master_helper(tmp_path, profile)
     assert helper.ROOT == tmp_path
     assert helper.PROFILE == profile
+    if "codex" in helper.AGENTS:
+        assert helper.AGENTS["codex"].launch.count("--no-daemon") == 1
+        assert "--dangerously-bypass-approvals-and-sandbox" in helper.AGENTS["codex"].launch
+    if "claude" in helper.AGENTS:
+        assert helper.AGENTS["claude"].launch == ("claude", "--dangerously-skip-permissions")
     assert set(helper.AGENTS) == (
         {"codex", "claude"} if profile == "both" else set() if profile == "custom" else {profile}
     )

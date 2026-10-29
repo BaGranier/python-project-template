@@ -19,6 +19,8 @@ def test_both_default_and_explicit_dispatch(
 ) -> None:
     project = template.generate(tmp_path, coding_agent="both")
     helper = template.configure_agent(project)
+    assert helper.AGENTS["codex"].launch.count("--no-daemon") == 1
+    assert helper.AGENTS["claude"].launch == ("claude", "--dangerously-skip-permissions")
     monkeypatch.setenv("AGENT_DEFAULT_PROVIDER", default)
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(helper, "start", lambda: calls.append(("start",)))
