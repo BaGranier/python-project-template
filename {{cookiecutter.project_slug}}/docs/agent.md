@@ -143,8 +143,8 @@ make agent
 
 Rebuild stops this project's stack, rebuilds its image and keeps the clone and
 volumes. The next start recreates the container. If a session already exists,
-preserve/apply its work and archive it after cleaning when the primary HEAD
-changes; the unchanged-base guard remains mandatory. Never silently reset a
+review its work when primary HEAD changes. An idle clean session refreshes
+automatically; otherwise use `make agent-rebase` or `make agent-archive`. Never silently reset a
 clone to pick up a host commit. Empty CUSTOM_AGENT_COMMAND starts the sandbox
 and explains `make agent-shell` rather than pretending a harness is available.
 
@@ -187,15 +187,68 @@ and configuration volume. Clean removes the Compose stack, not authentication.
 Profile metadata is stored outside the clone in `.agent/state.json`, with
 `default_provider` for both. Legacy `provider` metadata is recognized for
 single-provider sessions (a missing provider means Codex). A different profile
-is rejected. To change profiles, run `make agent-clean` (also supported for an
-old-profile session), retain all unmerged work, then archive `.agent` outside
-the checkout and rebuild/start. Credential volumes are never removed; existing
+is rejected. To change profiles, run `make agent-archive` (also supported for an
+old-profile session), then rebuild/start. The archived clone retains all work.
+Credential volumes are never removed; existing
 Codex/Claude volume names stay unchanged when switching to both.
 
 Before recovery, commit in the clone, run `make agent-diff` and
 `make agent-test`, stop the sandbox and run `make agent-apply`.
 The primary checkout must be clean and compatible with the saved base.
 No hard reset or push is performed.
+
+## Agent session lifecycle
+
+The primary checkout belongs to the user. The independent agent workspace has
+a saved base commit (`base` in `.agent/state.json`) and an `agent/<timestamp>`
+branch. A session is stale when primary HEAD differs from that base.
+Refresh/rebase/archive never change primary HEAD. Status/check report stale
+state and whether refresh is safe, without refreshing it.
+
+Normal workflow: `make agent`, local agent commits, review/test, stop, then
+`make agent-apply`. If primary advances with no remaining agent work, simply
+run `make agent` / `make agent-start` again for automatic refresh. Dirty/untracked
+files, unfinished Git operations and unapplied commits block replacement.
+Git patch comparison recognizes ordinary cherry-picks already in primary;
+empty commits, unintegrated merges and rewritten histories are retained conservatively.
+
+| Command | Behavior |
+| --- | --- |
+| `make agent-clean` | Clean runtime resources only; retain workspace/state/volumes. |
+| `make agent-refresh` | Explicit safe recreation on current primary HEAD. |
+| `make agent-rebase` | Rebase clean linear agent commits onto current primary HEAD. |
+| `make agent-archive` | Preserve and retire even dirty/divergent work for a new session. |
+
+The host removes the old runtime before replacement and checks the stopped
+workspace again. It never passes `--volumes`: authentication/custom volumes stay.
+Old workspace and state move to `.agent/archive/<timestamp>/` without copying
+large trees; ignored local files remain available too. Archives are not pruned
+automatically and may consume disk; review before manual deletion. A failed new
+clone does not delete the archived predecessor. Previous ports are reused when
+available, with localhost fallback otherwise. All profiles share this lifecycle.
+No redundant reset-session or credential-cleaning command is introduced.
+
+Rebase requires clean primary/agent trees and no pending operation. The host
+temporarily disables clone-configured hooks, filters, merge drivers and editors.
+Host inspections also disable clean/process filters; filter-dependent repositories
+may require manual review rather than automatic refresh.
+Conflicts remain visible, with the runtime stopped:
+
+```bash
+git -C .agent/workspace status
+# Resolve/stage files and explicitly choose:
+git -C .agent/workspace rebase --continue
+# Or:
+git -C .agent/workspace rebase --abort
+make agent-rebase  # reconcile metadata after completion/abort
+```
+
+No automatic abort, reset or push occurs. After rebase, test/review before
+`make agent-apply`; its unchanged-base and clean-tree guards remain mandatory.
+Host Podman is required to stop/remove the runtime before session changes.
+Grafts and replace objects are disabled for inspections. The former
+`GIT_GRAFT_FILE=/dev/null` caused a deprecation warning itself; the empty setting
+disables grafts without creating a file or suppressing warning advice.
 
 {% if cookiecutter.coding_agent != 'custom' %}
 ## Manual account persistence validation

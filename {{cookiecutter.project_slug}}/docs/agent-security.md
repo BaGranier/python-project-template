@@ -38,8 +38,9 @@ container. `podman info` must report rootless. No helper runs sudo.
 
 Run `make init` to create an independent repository and initial commit, then
 `make agent-check`. Commit/stash any later changes in the main checkout, then
-`make agent`. Existing clones resume only while primary HEAD equals the saved
-base. State (profile, legacy provider, base, branch, workspace, timestamp) lives in `.agent/state.json`,
+`make agent`. Stale idle clones refresh only after safety checks and runtime
+shutdown; unapplied work is refused and retained. State (profile, legacy provider,
+base, branch, workspace, timestamp) lives in `.agent/state.json`,
 outside the mounted workspace. The branch is `agent/<UTC timestamp>`.
 `make agent` never initializes Git automatically; a parent repository alone
 is insufficient. Use `make setup` for subsequent environment synchronization.
@@ -85,9 +86,10 @@ applied code, hooks and CI become trusted project content.
 
 `make agent-stop` stops containers; `make agent-clean` removes the stack/network
 while retaining the clone and all named volumes, including authentication.
-After completing a session, stop/clean, then manually move `.agent` to a safe
-archive outside the checkout before starting a new session. This explicit step
-preserves uncommitted work. Named volumes persist between sessions; use distinct
+An idle completed session refreshes automatically on next start. Explicit
+`make agent-archive` preserves even dirty work in `.agent/archive/`.
+`make agent-rebase` operates only in the clone; see [agent workflow](agent.md).
+Named volumes persist between sessions; use distinct
 project slugs for distinct projects. Delete credential volumes only deliberately
 with Podman after confirming they are no longer needed.
 

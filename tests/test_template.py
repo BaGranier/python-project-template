@@ -897,6 +897,8 @@ def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
             )
         assert "FROM node:22." in containerfile
         assert "agent-rebuild" in help_text
+        for target in ("agent-refresh", "agent-rebase", "agent-archive"):
+            assert target in help_text
         helper = configure_agent(project)
         assert set(helper.AGENTS) == installed
         if provider == "custom":
@@ -1197,6 +1199,10 @@ def test_agent_container_runtime(
         ]
         for sentinel_path in config_sentinels:
             helper.compose("exec", "-T", "agent", "touch", sentinel_path)
+        command(project, "make", "agent-refresh")
+        command(project, "make", "agent-start")
+        for sentinel_path in config_sentinels:
+            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
         if provider == "custom":
             (project / ".env").write_text(
                 (project / ".env").read_text()

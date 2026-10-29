@@ -220,11 +220,14 @@ uvx cruft update --variables-to-update '{"coding_agent":"both"}'
 
 un ancien état incompatible est refusé. `make agent-clean` peut arrêter/nettoyer
 l'ancienne stack sans effacer ses volumes. Préservez tous les commits/changements
-du clone, archivez `.agent` hors du checkout, puis reconstruisez et démarrez la
+du clone avec `make agent-archive`, puis reconstruisez et démarrez la
 nouvelle session. Les volumes Codex/Claude conservent leurs noms lors du passage
 à both, donc leurs authentifications restent récupérables. Les gardes Git restent
-actives : commitez la recette avant la première session ; si le HEAD principal
-change pendant une session, conservez/appliquez son travail avant de l'archiver.
+actives : commitez la recette avant la première session. Si le HEAD principal
+avance sans travail agent restant, le prochain `make agent` rafraîchit le clone.
+Sinon, utilisez `make agent-rebase` ou `make agent-archive` après revue ;
+`make agent-refresh` offre un refresh sûr explicite. Le HEAD principal n'est
+jamais réaligné automatiquement.
 La stack agent sélectionne automatiquement `podman-compose` (à installer sur
 l'hôte) ; le dev container garde son choix de provider. Une erreur de session
 systemd WSL déjà activée se traite d'abord par `wsl --shutdown` depuis Windows,

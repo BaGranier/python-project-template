@@ -81,6 +81,7 @@ class AgentState(TypedDict):
     default_provider: NotRequired[str]
     ports: NotRequired[dict[str, int]]
     preferred_ports: NotRequired[dict[str, int]]
+    pending_rebase_base: NotRequired[str]
 
 
 def setting(key: str, default: str = "") -> str:
@@ -168,12 +169,49 @@ def diagnose_wsl(message: str) -> None:
         )
 
 
-def git(path: Path, *args: str, capture: bool = True) -> str:
+def git(path: Path, *args: str, capture: bool = True, isolated: bool = False) -> str:
     # The agent controls clone-local Git config. Disable executable Git features
     # for host inspection; never run a script from the clone on the host.
     env = dict(os.environ)
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
-    env["GIT_GRAFT_FILE"] = "/dev/null"
+    # An existing /dev/null is still treated as a deprecated graft file by Git.
+    # Empty explicitly disables grafts, including clone-local info/grafts.
+    env["GIT_GRAFT_FILE"] = ""
+    if isolated:
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+        for key in tuple(env):
+            if key.startswith("GIT_CONFIG_") and key not in {
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_SYSTEM",
+            }:
+                del env[key]
+    filter_overrides: list[str] = []
+    if path == WORKSPACE:
+        # Even status can execute .gitattributes clean/process filters. Read
+        # config names without evaluating programs, then disable those drivers.
+        settings = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "config",
+                "--null",
+                "--name-only",
+                "--get-regexp",
+                "^filter\\.",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if settings.returncode not in (0, 1):
+            settings.check_returncode()
+        for key in settings.stdout.split("\0"):
+            if re.fullmatch(r"filter\..*\.(clean|smudge|process|required)", key, re.DOTALL):
+                value = "false" if key.endswith(".required") else ""
+                filter_overrides.extend(["-c", f"{key}={value}"])
     return run(
         [
             "git",
@@ -190,6 +228,7 @@ def git(path: Path, *args: str, capture: bool = True) -> str:
             f"core.worktree={path}",
             "-C",
             str(path),
+            *filter_overrides,
             *args,
         ],
         capture=capture,
@@ -242,7 +281,9 @@ def state(*, allow_profile_mismatch: bool = False) -> AgentState:
         raise ValueError("Invalid base commit in agent state.")
     if not re.fullmatch(r"agent/[0-9TZ-]+", result.get("branch", "")):
         raise ValueError("Invalid agent branch in state.")
-    if git(WORKSPACE, "branch", "--show-current") != result["branch"]:
+    branch = git(WORKSPACE, "branch", "--show-current")
+    rebasing = any((git_dir / name).exists() for name in ("rebase-merge", "rebase-apply"))
+    if branch != result["branch"] and not (not branch and rebasing):
         raise ValueError("Agent changed branch; restore the session branch before continuing.")
     return result
 
@@ -292,12 +333,9 @@ def prepare() -> AgentState:
     if git(ROOT, "check-ignore", ".agent/workspace") != ".agent/workspace":
         raise ValueError(".agent/ must be ignored by the primary repository.")
     if STATE.exists():
-        result = state()
+        result = finish_rebase(state())
         if git(ROOT, "rev-parse", "HEAD") != result["base"]:
-            raise ValueError(
-                "Primary HEAD changed since session creation. Review/apply or archive "
-                ".agent after stopping the sandbox before starting another session."
-            )
+            return refresh()
         if PROFILE == "both":
             result["default_provider"] = default_provider()
         STATE.write_text(json.dumps(result, indent=2) + "\n")
@@ -306,7 +344,7 @@ def prepare() -> AgentState:
         raise ValueError("Workspace exists without state. Inspect/archive .agent manually.")
     STATE_DIR.mkdir(exist_ok=True)
     base = git(ROOT, "rev-parse", "HEAD")
-    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
     branch = f"agent/{stamp}"
     run(["git", "clone", "--no-hardlinks", "--no-local", str(ROOT), str(WORKSPACE)])
     git(WORKSPACE, "remote", "remove", "origin")
@@ -329,6 +367,233 @@ def prepare() -> AgentState:
         result["default_provider"] = default_provider()
     STATE.write_text(json.dumps(result, indent=2) + "\n")
     return result
+
+
+def git_operation() -> str:
+    for name in (
+        "rebase-merge",
+        "rebase-apply",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "sequencer",
+        "BISECT_LOG",
+        "index.lock",
+    ):
+        if (WORKSPACE / ".git" / name).exists():
+            return name
+    return ""
+
+
+@contextmanager
+def comparison_repository() -> Iterator[Path]:
+    # Compare actual objects in a trusted bare repo: no agent remotes, hooks,
+    # grafts, replacements or config are used to import either history.
+    with tempfile.TemporaryDirectory(prefix="agent-comparison-") as directory:
+        path = Path(directory) / "repository.git"
+        run(["git", "init", "--bare", "--initial-branch=main", str(path)], capture=True)
+        for source in (ROOT, WORKSPACE):
+            copy_objects(source / ".git/objects", path / "objects")
+        yield path
+
+
+def copy_objects(source: Path, destination: Path) -> None:
+    # Git objects are immutable and often read-only. Keep existing objects rather
+    # than overwriting duplicate hashes; do not copy info/alternates or caches.
+    def missing_object(src: str, dst: str) -> str:
+        if not Path(dst).exists():
+            shutil.copy2(src, dst)
+        return dst
+
+    for path in source.iterdir():
+        if path.is_dir() and (path.name == "pack" or re.fullmatch(r"[0-9a-f]{2}", path.name)):
+            shutil.copytree(
+                path, destination / path.name, dirs_exist_ok=True, copy_function=missing_object
+            )
+
+
+def session_work(session: AgentState) -> tuple[int, int, str]:
+    dirty = len(git(WORKSPACE, "status", "--porcelain", "--untracked-files=all").splitlines())
+    operation = git_operation()
+    primary = validate_repository()
+    head = git(WORKSPACE, "rev-parse", "HEAD")
+    with comparison_repository() as repository:
+        # A rewritten/detached history is ambiguous even if its tree looks empty.
+        try:
+            git(repository, "merge-base", "--is-ancestor", session["base"], head)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1:
+                raise
+            return 1, dirty, operation or "agent history diverged from recorded base"
+        cherry = git(repository, "cherry", primary, head, session["base"])
+        unapplied = {line.split()[1] for line in cherry.splitlines() if line.startswith("+")}
+        # cherry skips merge and empty commits; preserve both conservatively.
+        for commit in git(
+            repository, "rev-list", head, "^" + primary, "^" + session["base"]
+        ).splitlines():
+            parents = git(repository, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+            if len(parents) != 1 or not git(
+                repository, "diff-tree", "--root", "--no-commit-id", "-r", commit
+            ):
+                unapplied.add(commit)
+    return len(unapplied), dirty, operation
+
+
+def report_session(session: AgentState) -> bool:
+    primary = validate_repository()
+    commits, dirty, operation = session_work(session)
+    stale = primary != session["base"]
+    print(f"Agent session: {'stale' if stale else 'current'}")
+    print(f"Session base: {session['base']}\nPrimary HEAD: {primary}")
+    print(f"Agent work: {commits} unapplied commits, {dirty} modified/untracked files")
+    if operation:
+        print(f"Git operation/history requiring review: {operation}")
+    safe = not (commits or dirty or operation)
+    if stale:
+        print("Safe automatic refresh available on next start." if safe else "Refresh blocked.")
+    return safe
+
+
+def require_no_work(session: AgentState) -> None:
+    if not report_session(session):
+        raise ValueError(
+            "The agent workspace contains unapplied work or an unfinished Git operation.\n"
+            f"Base: {session['base']}\nPrimary: {validate_repository()}\n"
+            f"Agent: {git(WORKSPACE, 'rev-parse', 'HEAD')}\n"
+            "Review with make agent-diff and make agent-test. Then make agent-rebase, "
+            "or make agent-archive to retain the old session. Use make agent-apply "
+            "only with a compatible base. No workspace changes made."
+        )
+
+
+def stop_session_runtime() -> None:
+    if not shutil.which("podman"):
+        raise ValueError(
+            "Podman required on the host to stop/remove runtime before session changes."
+        )
+    compose("down")  # Never --volumes: authentication and custom tools survive.
+
+
+def retire_session() -> Path:
+    archive = STATE_DIR / "archive"
+    if archive.is_symlink():
+        raise ValueError("Agent archive must not be a symlink.")
+    archive.mkdir(exist_ok=True)
+    destination = archive / dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    destination.mkdir()
+    WORKSPACE.rename(destination / "workspace")
+    STATE.rename(destination / "state.json")
+    print(f"Previous session retained at {destination}; no files copied or credentials removed.")
+    return destination
+
+
+def refresh() -> AgentState:
+    validate_repository()
+    clean_repository(ROOT)
+    if not STATE.exists():
+        return prepare()
+    session = finish_rebase(state())
+    require_no_work(session)
+    stop_session_runtime()
+    # Freeze the runtime before the final check; it may have edited during inspection.
+    session = state()
+    require_no_work(session)
+    print(
+        f"Refreshing isolated agent workspace. Old base: {session['base']}\n"
+        f"New base: {validate_repository()}"
+    )
+    retire_session()
+    result = prepare()
+    if "ports" in session:
+        result["ports"] = session["ports"]
+    if "preferred_ports" in session:
+        result["preferred_ports"] = session["preferred_ports"]
+    STATE.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"Agent workspace refreshed. Base commit: {result['base']}\nCredentials preserved.")
+    return result
+
+
+def archive_session() -> None:
+    state(allow_profile_mismatch=True)
+    stop_session_runtime()
+    state(allow_profile_mismatch=True)
+    retire_session()
+    print("Session archived. Run make agent-start for a fresh session. Credentials preserved.")
+
+
+def finish_rebase(session: AgentState) -> AgentState:
+    target = session.get("pending_rebase_base")
+    if not target or git_operation():
+        return session
+    if not re.fullmatch(r"[0-9a-f]{40,64}", target):
+        raise ValueError("Invalid pending rebase target.")
+    try:
+        git(WORKSPACE, "merge-base", "--is-ancestor", target, "HEAD")
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode != 1:
+            raise
+        print("Previous rebase was aborted; original session base retained.")
+    else:
+        session["base"] = target
+        print(f"Completed rebase recognized. Session base: {target}")
+    del session["pending_rebase_base"]
+    STATE.write_text(json.dumps(session, indent=2) + "\n")
+    return session
+
+
+def rebase_session() -> None:
+    primary = validate_repository()
+    clean_repository(ROOT)
+    session = finish_rebase(state())
+    if git_operation():
+        raise ValueError("Git operation already in progress. Resolve or abort it explicitly.")
+    clean_repository(WORKSPACE)
+    if primary == session["base"]:
+        print("Agent base already matches primary HEAD; no rebase needed.")
+        return
+    commits, _, operation = session_work(session)
+    if operation:
+        raise ValueError(f"Cannot rebase ambiguous history: {operation}")
+    if not commits:
+        refresh()
+        return
+    if git(WORKSPACE, "rev-list", "--merges", f"{session['base']}..HEAD"):
+        raise ValueError(
+            "Merge commits require manual review/rebase; archive preserves the session."
+        )
+    stop_session_runtime()
+    state()
+    clean_repository(WORKSPACE)
+    if git_operation():
+        raise ValueError("Git operation appeared while stopping the runtime; inspect workspace.")
+    # Import primary objects without invoking fetch against clone-controlled config.
+    copy_objects(ROOT / ".git/objects", WORKSPACE / ".git/objects")
+    session["pending_rebase_base"] = primary
+    STATE.write_text(json.dumps(session, indent=2) + "\n")
+    config = WORKSPACE / ".git/config"
+    original = config.read_bytes()
+    # A host-side rebase must not execute clone-configured filters, merge drivers,
+    # editors or hooks. Keep only trusted identity in a temporary local config.
+    safe_config = "[core]\nrepositoryformatversion = 0\nbare = false\n"
+    for key in ("user.name", "user.email"):
+        value = git(ROOT, "config", "--get", key)
+        section, name = key.split(".")
+        safe_config += f"[{section}]\n{name} = {json.dumps(value, ensure_ascii=False)}\n"
+    try:
+        config.write_text(safe_config)
+        git(
+            WORKSPACE, "rebase", "--no-autostash", "--onto", primary, session["base"], isolated=True
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(
+            "Agent rebase stopped because of conflicts or a Git error. No automatic abort/reset.\n"
+            "Inspect: git -C .agent/workspace status\n"
+            "Resolve and git -C .agent/workspace rebase --continue, or rebase --abort explicitly.\n"
+            "Then run make agent-rebase again to reconcile session metadata."
+        ) from exc
+    finally:
+        config.write_bytes(original)
+    finish_rebase(session)
 
 
 def environment(*, preferred: bool = False) -> dict[str, str]:
@@ -557,7 +822,7 @@ def check(*, inspect_image: bool = True) -> None:
     run([provider, "--version"], env=environment())
     base = validate_repository()
     if STATE.exists():
-        state()
+        report_session(state())
     elif WORKSPACE.exists():
         raise ValueError("Workspace without state; inspect .agent before starting.")
     if not (ROOT / "containers/Containerfile").is_file():
@@ -690,6 +955,7 @@ def apply() -> None:
 
 def status() -> None:
     result = state()
+    report_session(result)
     container = agent_container()
     running = container is not None and container["State"]["Running"]
     if running and container is not None:
@@ -737,6 +1003,9 @@ def main() -> None:
             "check",
             "start",
             "rebuild",
+            "refresh",
+            "rebase",
+            "archive",
             "run",
             "login",
             "shell",
@@ -770,6 +1039,12 @@ def main() -> None:
                 check()
             elif command == "rebuild":
                 rebuild()
+            elif command == "refresh":
+                refresh()
+            elif command == "rebase":
+                rebase_session()
+            elif command == "archive":
+                archive_session()
             elif command in {"start", "run", "login"}:
                 start()
             elif command in {"shell", "test"}:

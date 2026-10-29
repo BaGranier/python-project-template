@@ -71,6 +71,13 @@ agent: ## Start sandbox and launch harness (custom: explain setup if unconfigure
 	$(AGENT) run
 agent-rebuild: ## Stop this stack and rebuild its image; preserve clone and volumes
 	$(AGENT) rebuild
+.PHONY: agent-refresh agent-rebase agent-archive
+agent-refresh: ## Safely recreate workspace on current primary HEAD
+	$(AGENT) refresh
+agent-rebase: ## Rebase clean agent commits onto current primary HEAD
+	$(AGENT) rebase
+agent-archive: ## Retire workspace/state without deleting work or credentials
+	$(AGENT) archive
 {% if cookiecutter.coding_agent != 'custom' %}
 .PHONY: agent-login
 agent-login: ## Start/resume and authenticate the default provider interactively

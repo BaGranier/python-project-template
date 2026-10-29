@@ -51,6 +51,13 @@ agent-clean: ## Remove stack/network; preserve clone, state and credential volum
 	uv run python scripts/agent.py clean
 agent-rebuild: ## Rebuild the selected profile; preserve clone and volumes
 	uv run python scripts/agent.py rebuild
+.PHONY: agent-refresh agent-rebase agent-archive
+agent-refresh: ## Safely recreate the workspace on current primary HEAD
+	uv run python scripts/agent.py refresh
+agent-rebase: ## Rebase clean agent commits onto primary HEAD; leave conflicts explicit
+	uv run python scripts/agent.py rebase
+agent-archive: ## Retire the current workspace/state without deleting work or credentials
+	uv run python scripts/agent.py archive
 agent-codex: ## Open Codex in the shared sandbox (profile must include it)
 	uv run python scripts/agent.py run --provider codex
 agent-claude: ## Open Claude in the shared sandbox (profile must include it)

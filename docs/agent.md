@@ -49,8 +49,8 @@ Build installs use `/opt/agent-tools`; runtime user tools/config persist in name
 `.local` and `.config` volumes. Harness-specific credentials need dedicated
 named volumes if stored elsewhere; never mount the host HOME.
 
-Changing profile while a session exists is refused. Stop/clean the old stack,
-retain all unmerged work, archive `.agent` outside the checkout, then rebuild
+Changing profile while a session exists is refused. Use `make agent-archive`
+to stop and retain the old workspace/state, then rebuild
 and start the new profile. Credential volumes are preserved, including when
 switching between a single provider and both.
 
@@ -111,7 +111,66 @@ security boundary. Never use that command directly on the host checkout.
 `agent-stop` stops the container. `agent-clean` removes the stack/network,
 preserving clone, state and all named volumes, including authentication.
 `agent-rebuild` stops and rebuilds the image, preserving work and credentials.
-After applying commits, archive the old session before creating another base.
+After applying commits, the next start safely refreshes an idle completed session.
+
+## Agent session lifecycle
+
+The primary checkout is the user's repository. The agent workspace is the
+independent `.agent/workspace` clone, with a saved base commit (`base` in
+state.json) and an `agent/<timestamp>` branch. A session is stale when primary
+HEAD differs from that base. Refresh, rebase and archive never change primary HEAD.
+
+Normal workflow: `make agent`, local agent commits, `make agent-diff`,
+`make agent-test`, stop and `make agent-apply`. If primary advances without any
+remaining agent work, simply run `make agent` or `make agent-start`: refresh is
+automatic. `agent-status` and `agent-check` report stale state without refreshing.
+
+Refresh requires clean primary and agent checkouts, no unfinished Git operation,
+and no unapplied commits. A trusted temporary Git object store compares patch IDs
+to recognize ordinary cherry-picks already integrated into primary. Empty commits,
+unintegrated merges and rewritten histories are retained conservatively.
+Dirty/untracked files block replacement. No automatic stash/reset is performed.
+
+| Command | Purpose |
+| --- | --- |
+| `make agent-clean` | Remove runtime stack/network; retain workspace/state/volumes. |
+| `make agent-refresh` | Explicit safe recreation on current primary HEAD. |
+| `make agent-rebase` | Rebase clean linear agent commits onto current primary HEAD. |
+| `make agent-archive` | Preserve and retire even dirty/divergent work, allowing a fresh session. |
+
+Before replacing a workspace, the host removes its runtime with Compose `down`,
+never `--volumes`, and rechecks the stopped workspace. The old clone and state
+move to `.agent/archive/<timestamp>/` without copying large trees; ignored local
+files are retained too. Archives are not pruned automatically and may consume
+disk: review before manually deleting them. Archived metadata retains its original
+workspace path. If fresh cloning fails, the archived predecessor remains available.
+Codex/Claude/custom volumes survive, and previous ports are reused when available
+with the existing localhost fallback. Both harnesses share the new workspace.
+No redundant reset-session or credential-destruction command is introduced.
+
+Rebase requires clean primary/agent trees and no pending Git operation. Clone
+hooks, filters, merge drivers and editors are disabled during host-side rebase.
+Host inspections also disable clean/process filters. Filter-dependent repositories
+may therefore require manual review rather than automatic refresh.
+Conflicts remain in the workspace, with the runtime stopped:
+
+```bash
+git -C .agent/workspace status
+# Resolve files and stage them, then explicitly choose:
+git -C .agent/workspace rebase --continue
+# Or:
+git -C .agent/workspace rebase --abort
+make agent-rebase  # reconcile metadata after completing/aborting
+```
+
+There is no automatic abort, conflict resolution, reset or push. After successful
+rebase, test/review before `make agent-apply`, whose unchanged-base and clean-tree
+guards still apply. Host Podman is required for teardown before session changes;
+pure Git tests mock only this runtime boundary.
+
+The previous `GIT_GRAFT_FILE=/dev/null` caused Git's graft deprecation warning
+even without an info/grafts file. An explicit empty setting now disables grafts
+without creating a file or suppressing warnings; replace objects remain disabled.
 
 ## Deliberate host/agent test boundary
 
