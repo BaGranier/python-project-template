@@ -112,6 +112,14 @@ allocation, lint/type checks, and real generated-project setup/check/build/docs
 remain executable. Temporary projects use their own venv, never `/opt/venv`.
 Pytest reports skipped tests and reasons explicitly.
 
+Shell tests separate environment preparation, interactive `execve` dispatch,
+and actual Bash/Zsh RC loading with `-i -c` and a 10-second timeout. They never
+drive a persistent interactive shell through a stdin pipe. No PTY or real
+Oh My Zsh installation is required in CI. Validate terminal UX manually from
+a real WSL terminal in a generated project: `make shell`, then
+`echo "$VIRTUAL_ENV"` and `command -v python`. Existing Oh My Zsh should retain
+its prompt, aliases and plugins; `exit` must return to the parent shell.
+
 Host-only checks include real Podman builds/startup, mount inspection,
 multi-container coexistence, port publishing, engine security and persistent
 volume recreation. They skip if the engine is absent/inaccessible. This boundary

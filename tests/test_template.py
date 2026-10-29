@@ -29,14 +29,16 @@ from cookiecutter.main import cookiecutter
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def command(path: Path, *args: str, env: dict[str, str] | None = None) -> str:
+def command(
+    path: Path, *args: str, env: dict[str, str] | None = None, timeout: float | None = None
+) -> str:
     # A sandbox uses /opt/venv for the generator itself. Child projects must
     # never synchronize into that environment and uninstall the running tools.
     env = dict(os.environ if env is None else env)
     if path != ROOT and (path / "pyproject.toml").exists():
         env["UV_PROJECT_ENVIRONMENT"] = str(path / ".venv")
     result = subprocess.run(
-        list(args), cwd=path, env=env, text=True, capture_output=True, check=False
+        list(args), cwd=path, env=env, text=True, capture_output=True, check=False, timeout=timeout
     )
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
@@ -211,50 +213,102 @@ def test_jupytext(default_project: Path) -> None:
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_shell_environment(
+def test_shell_environment(shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    if not shutil.which(shell):
+        pytest.skip(f"{shell} unavailable")
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    helper = load_module(ROOT / "{{cookiecutter.project_slug}}/scripts/shell.py", "shell_helper")
+    bin_dir = tmp_path / ".venv/bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").touch()
+    monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "previous-venv"))
+    monkeypatch.setenv("PYTHONHOME", "/unused-python-home")
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join([str(bin_dir), str(tmp_path / "previous-venv/bin"), os.environ["PATH"]]),
+    )
+    parent = dict(os.environ)
+    executable, env = helper.shell_environment(tmp_path, shell)
+    assert executable == shutil.which(shell)
+    assert env["VIRTUAL_ENV"] == str(tmp_path / ".venv")
+    assert env["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    assert env["PATH"].split(os.pathsep).count(str(bin_dir)) == 1
+    assert str(tmp_path / "previous-venv/bin") not in env["PATH"].split(os.pathsep)
+    assert "PYTHONHOME" not in env
+    assert dict(os.environ) == parent
+    with monkeypatch.context() as nested_environment:
+        for key, value in env.items():
+            nested_environment.setenv(key, value)
+        _, nested = helper.shell_environment(tmp_path, shell)
+    assert nested["PATH"] == env["PATH"]
+    assert nested["VIRTUAL_ENV"] == env["VIRTUAL_ENV"]
+    with pytest.raises(ValueError, match="bash or zsh"):
+        helper.shell_environment(tmp_path, "sh")
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_shell_rc_loading(
     default_project: Path, shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     if not shutil.which(shell):
         pytest.skip(f"{shell} unavailable")
     command(default_project, "uv", "sync")
-    helper = load_module(default_project / "scripts/shell.py", "shell_helper")
+    helper = load_module(default_project / "scripts/shell.py", "shell_rc_helper")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ZDOTDIR", str(tmp_path))
     sentinel = tmp_path / (".zshrc" if shell == "zsh" else ".bashrc")
-    sentinel.write_text('export TEMPLATE_RC_LOADED=1\nalias template_alias="echo alias-loaded"\n')
-    monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    contents = 'export TEMPLATE_RC_LOADED=1\nalias template_alias="echo alias-loaded"\n'
+    sentinel.write_text(contents)
     executable, env = helper.shell_environment(default_project, shell)
-    assert env["VIRTUAL_ENV"] == str(default_project / ".venv")
-    assert env["PATH"].split(os.pathsep)[0] == str(default_project / ".venv/bin")
-    flags = ["-i"]
-    result = command(default_project, executable, *flags, "-c", "command -v python", env=env)
-    assert result.strip() == str(default_project / ".venv/bin/python")
-    assert (
-        command(
-            default_project, executable, *flags, "-c", 'echo "$TEMPLATE_RC_LOADED"', env=env
-        ).strip()
-        == "1"
+    # -i loads RC files; -c gives the shell a finite command instead of a piped REPL.
+    output = command(
+        default_project,
+        executable,
+        "-i",
+        "-c",
+        'printf "RC=%s\\nVENV=%s\\n" "$TEMPLATE_RC_LOADED" "$VIRTUAL_ENV"; '
+        "command -v python; alias template_alias",
+        env=env,
+        timeout=10,
     )
-    assert "alias-loaded" in command(
-        default_project, executable, *flags, "-c", "alias template_alias", env=env
+    assert "RC=1" in output.splitlines()
+    assert f"VENV={default_project / '.venv'}" in output.splitlines()
+    assert str(default_project / ".venv/bin/python") in output.splitlines()
+    assert "alias-loaded" in output
+    assert sentinel.read_text() == contents
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_shell_interactive_dispatch(
+    shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    helper = load_module(
+        ROOT / "{{cookiecutter.project_slug}}/scripts/shell.py", "shell_main_helper"
     )
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    _, nested = helper.shell_environment(default_project, shell)
-    assert nested["PATH"].split(os.pathsep).count(str(default_project / ".venv/bin")) == 1
-    actual = subprocess.run(
-        [sys.executable, str(default_project / "scripts/shell.py")],
-        cwd=default_project,
-        input='echo "RC=$TEMPLATE_RC_LOADED"\nexit\n',
-        env={**env, "SHELL": executable},
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert actual.returncode == 0 and "RC=1" in actual.stdout
-    assert sentinel.read_text().startswith("export TEMPLATE_RC_LOADED=1")
-    with pytest.raises(ValueError, match="bash or zsh"):
-        helper.shell_environment(default_project, "sh")
+    executable = f"/usr/bin/{shell}"
+    env = {"VIRTUAL_ENV": str(tmp_path / ".venv"), "PATH": "prepared-path"}
+    monkeypatch.setenv("SHELL", executable)
+    monkeypatch.chdir(tmp_path)
+
+    def prepare(root: Path, selected: str) -> tuple[str, dict[str, str]]:
+        assert root == tmp_path and selected == executable
+        return executable, env
+
+    class ShellReplacedProcess(Exception):
+        pass
+
+    def replace_process(path: str, args: list[str], environment: dict[str, str]) -> None:
+        assert path == executable
+        assert args == [executable, "-i"]
+        assert environment == env
+        raise ShellReplacedProcess
+
+    monkeypatch.setattr(helper, "shell_environment", prepare)
+    monkeypatch.setattr(helper.os, "execve", replace_process)
+    with pytest.raises(ShellReplacedProcess):
+        helper.main()
 
 
 def initialize(project: Path) -> None:
