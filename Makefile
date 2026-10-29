@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup test lint format-check typecheck check generate-default clean-generated
 help: ## List maintenance commands
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk -v hidden="$(AGENT_UPDATE_HIDDEN)" 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {if ($$1 !~ hidden) printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 setup: ## Install the template tooling
 	uv sync
 	@test -e .env || cp .env.example .env
@@ -66,3 +66,36 @@ agent-login-codex: ## Authenticate Codex in its dedicated volume
 	uv run python scripts/agent.py login --provider codex
 agent-login-claude: ## Authenticate Claude in its dedicated volume
 	uv run python scripts/agent.py login --provider claude
+
+AGENT_PROFILE ?= $(or $(shell awk -F= '/^AGENT_PROFILE=/ {print $$2}' .env 2>/dev/null),both)
+AGENT_UPDATE_HIDDEN := ^$$
+ifeq ($(AGENT_PROFILE),custom)
+AGENT_UPDATE_HIDDEN := ^agent-(versions|update)
+else ifeq ($(AGENT_PROFILE),codex)
+AGENT_UPDATE_HIDDEN := ^agent-update-claude$$
+else ifeq ($(AGENT_PROFILE),claude)
+AGENT_UPDATE_HIDDEN := ^agent-update-codex$$
+endif
+ifneq ($(AGENT_PROFILE),custom)
+
+.PHONY: agent-versions agent-update-check agent-update
+ifneq ($(origin VERSION),undefined)
+export VERSION
+endif
+agent-versions: ## Show configured/installed harness versions
+	uv run python scripts/agent.py versions
+agent-update-check: ## Check for available harness updates
+	uv run python scripts/agent.py update-check
+agent-update: ## Update all installed official harnesses
+	uv run python scripts/agent.py update
+ifneq ($(AGENT_PROFILE),claude)
+.PHONY: agent-update-codex
+agent-update-codex: ## Update Codex
+	uv run python scripts/agent.py update --provider codex
+endif
+ifneq ($(AGENT_PROFILE),codex)
+.PHONY: agent-update-claude
+agent-update-claude: ## Update Claude Code
+	uv run python scripts/agent.py update --provider claude
+endif
+endif

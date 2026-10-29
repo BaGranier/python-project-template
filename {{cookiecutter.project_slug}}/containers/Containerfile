@@ -44,20 +44,20 @@ RUN node --version && npm --version
 
 FROM agent-base AS agent
 {% if cookiecutter.coding_agent in ['codex', 'both'] %}
-ARG CODEX_VERSION=0.164.0
-RUN npm install --global @openai/codex@${CODEX_VERSION} \
+ARG CODEX_VERSION
+RUN test -n "$CODEX_VERSION" && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
-    && codex --version
+    && test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"
 ENV CODEX_HOME=/home/agent/.codex
 RUN mkdir -p "$CODEX_HOME" \
     && printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml" \
     && chown -R agent:agent "$CODEX_HOME"
 {% endif %}
 {% if cookiecutter.coding_agent in ['claude', 'both'] %}
-ARG CLAUDE_CODE_VERSION=2.1.311
-RUN npm install --global @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ARG CLAUDE_CODE_VERSION
+RUN test -n "$CLAUDE_CODE_VERSION" && npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \
-    && claude --version
+    && test "$(claude --version)" = "${CLAUDE_CODE_VERSION} (Claude Code)"
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
     DISABLE_AUTOUPDATER=1
 RUN mkdir -p "$CLAUDE_CONFIG_DIR" && chown -R agent:agent "$CLAUDE_CONFIG_DIR"

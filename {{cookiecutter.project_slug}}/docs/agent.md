@@ -141,8 +141,9 @@ make agent-rebuild
 make agent
 ```
 
-Rebuild stops this project's stack, rebuilds its image and keeps the clone and
-volumes. The next start recreates the container. If a session already exists,
+Rebuild requires a stopped stack (`make agent-stop` first), builds a candidate
+image, and keeps the clone, state and volumes. An existing container is recreated
+and left stopped after verification; the next start resumes it. If a session already exists,
 review its work when primary HEAD changes. An idle clean session refreshes
 automatically; otherwise use `make agent-rebase` or `make agent-archive`. Never silently reset a
 clone to pick up a host commit. Empty CUSTOM_AGENT_COMMAND starts the sandbox
@@ -263,4 +264,114 @@ Real authentication is deliberately not automated by pytest. On the host:
 
 Do not include codes, auth-file contents or tokens in logs/issues. Automated
 runtime tests use a non-secret volume sentinel, never a real account.
+{% endif %}
+
+{% if cookiecutter.coding_agent != 'custom' %}
+## Updating coding harnesses
+
+Harness updates are managed by the Podman image lifecycle rather than by
+modifying the running container. Harness binaries are image-managed,
+credentials are volume-managed, and the workspace is Git-managed.
+
+`containers/harness-versions.env` records explicit stable npm versions. Commit
+its changes to reproduce the environment later. Host `CODEX_VERSION` /
+`CLAUDE_CODE_VERSION` variables and `.env` cannot override these pins.
+`agent-start` builds a missing image using the pins; it never resolves `latest`.
+An existing image is updated only through an explicit update or rebuild.
+
+On the host:
+
+```bash
+make agent-versions       # Configured and installed versions; no Internet lookup
+make agent-update-check   # Read-only npm registry lookup; network required
+make agent-stop           # Exit the interactive session first
+make agent-update         # Resolve and update all harnesses in this profile
+make agent-start
+make agent-versions
+```
+
+Provider targets are available only when included in the profile:
+
+```bash
+make agent-update-codex
+make agent-update-claude
+# Controlled upgrade, downgrade, or rollback:
+make agent-update-codex VERSION=0.165.0
+make agent-update-claude VERSION=2.1.311
+```
+
+Without `VERSION`, the registry's stable `latest` tag is resolved to an explicit
+`X.Y.Z` pin. Only stable numeric versions are accepted. `VERSION` applies to a
+single provider target; omit it for `agent-update`. `agent-update-check` compares
+the configured pins to the registry; use `agent-versions` to inspect an older
+installed image. Network failures leave the pins and runtime untouched.
+
+Updates and `agent-rebuild` require a stopped container, conservatively treating
+any running agent container as in use. Under the host lifecycle lock they build
+a separately tagged candidate, then run each installed CLI's `--version` as UID
+1000 without a network or credentials. The build itself also asserts the exact
+version. Only after all probes pass are the image tag and pins activated.
+If activation fails, the old pins and image tag are restored and the old
+container is recreated when one existed. If host/engine failure also prevents
+recovery, inspect the reported error, restore the recorded pin from Git, then
+retry `make agent-rebuild`; do not delete the workspace or credential volumes.
+
+An existing stopped agent container is recreated, verified and left stopped;
+if none exists, creation waits for `agent-start`. No clone, reset, checkout,
+rebase, or Python synchronization runs during a harness rebuild. Workspace,
+`.agent/state.json`, named credential volumes and saved ports are retained.
+Port collisions during recreation can fail activation safely; free the saved
+port before retrying. Normal startup retains its existing port fallback.
+A later commit of the pins uses the normal HEAD/session refresh rules:
+unapplied work continues to block automatic workspace refresh.
+
+`agent-check` warns when configured and installed versions differ and suggests
+`make agent-rebuild`. A configuration-only report remains available with no
+container/image or Podman engine. Custom profiles expose `agent-rebuild`, with
+no automatic management of unknown harnesses. The `none` profile has no agent
+update targets.
+
+Codex retains `--no-daemon`. Its launcher passes the officially supported
+[`check_for_update_on_startup=false`](https://developers.openai.com/codex/config-reference)
+configuration so existing credential volumes also avoid startup update prompts.
+Claude Code retains the official
+[`DISABLE_AUTOUPDATER=1`](https://code.claude.com/docs/en/env-vars)
+setting because deployment manages its updates. Direct manual self-update
+commands are unnecessary and may fail against the immutable system install.
+Neither harness gains root, sudo, capabilities, host HOME, an engine socket,
+or write access to `/usr/local/bin` or `/usr/local/lib/node_modules`.
+
+Node/npm also belong to the image. Ignore npm self-update notifications inside
+the agent; update Node/npm by changing the Containerfile and rebuilding.
+Old image layers are retained. Optional host maintenance: `podman image prune`
+after reviewing unused images. No automatic system-wide prune runs.
+
+### Codex update fails with EACCES under /usr/local/lib/node_modules
+
+The npm global install is owned by root at image build time. The runtime runs
+as non-root `agent`, so an in-session `npm install -g @openai/codex` cannot
+replace it. This permission boundary is intentional. From the host, use:
+
+```bash
+exit                      # Leave Codex
+make agent-stop
+make agent-update-codex
+make agent-codex           # Or make agent for a Codex-only generated project
+```
+
+Do not use `sudo npm install -g @openai/codex` or make system npm directories
+writable. Apply the same image lifecycle to Claude Code updates.
+
+### Manual WSL update and persistence validation
+
+On a rootless Podman WSL/Linux host, run `make agent-versions` and
+`make agent-update-check`. If an update exists, exit the harness, stop the
+container, update the provider, then start and check the installed versions.
+Reopen Codex and Claude sequentially and confirm both existing logins survive
+without a new authentication flow. For repeatable rollback testing use an
+explicit older `VERSION`, then restore the desired pin. Runtime pytest tests
+use non-secret sentinels in both credential volumes, preserve a workspace file
+and state across rebuild/recreation, and verify CLI versions and non-root
+permissions. They skip when a usable rootless engine is unavailable; real
+account persistence requires this manual validation.
 {% endif %}

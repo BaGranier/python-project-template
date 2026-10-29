@@ -35,6 +35,8 @@ if context["coding_agent"] == "custom":
     remove("CLAUDE.md")
 if context["coding_agent"] != "custom":
     remove("containers/agent-custom-install.sh")
+if context["coding_agent"] in ("none", "custom"):
+    remove("containers/harness-versions.env")
 if context["coding_agent"] == "none":
     remove("scripts/agent.py")
     remove("containers/compose.agent.yaml")

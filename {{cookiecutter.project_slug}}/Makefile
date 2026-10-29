@@ -69,7 +69,7 @@ AGENT := uv run --no-project --python $(AGENT_PYTHON) python scripts/agent.py
 .PHONY: agent agent-check agent-rebuild agent-start agent-shell agent-stop agent-status agent-logs agent-diff agent-test agent-apply agent-clean
 agent: ## Start sandbox and launch harness (custom: explain setup if unconfigured)
 	$(AGENT) run
-agent-rebuild: ## Stop this stack and rebuild its image; preserve clone and volumes
+agent-rebuild: ## Rebuild the agent image; requires a stopped sandbox
 	$(AGENT) rebuild
 .PHONY: agent-refresh agent-rebase agent-archive
 agent-refresh: ## Safely recreate workspace on current primary HEAD
@@ -79,6 +79,28 @@ agent-rebase: ## Rebase clean agent commits onto current primary HEAD
 agent-archive: ## Retire workspace/state without deleting work or credentials
 	$(AGENT) archive
 {% if cookiecutter.coding_agent != 'custom' %}
+
+.PHONY: agent-versions agent-update-check agent-update
+ifneq ($(origin VERSION),undefined)
+export VERSION
+endif
+agent-versions: ## Show configured/installed harness versions
+	$(AGENT) versions
+agent-update-check: ## Check for available harness updates
+	$(AGENT) update-check
+agent-update: ## Update all installed official harnesses
+	$(AGENT) update
+{% if cookiecutter.coding_agent in ['codex', 'both'] %}
+.PHONY: agent-update-codex
+agent-update-codex: ## Update Codex
+	$(AGENT) update --provider codex
+{% endif %}
+{% if cookiecutter.coding_agent in ['claude', 'both'] %}
+.PHONY: agent-update-claude
+agent-update-claude: ## Update Claude Code
+	$(AGENT) update --provider claude
+{% endif %}
+
 .PHONY: agent-login
 agent-login: ## Start/resume and authenticate the default provider interactively
 	$(AGENT) login

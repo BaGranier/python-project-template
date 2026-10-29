@@ -6,6 +6,15 @@ services:
       context: ..
       dockerfile: containers/Containerfile
       target: agent
+{% if cookiecutter.coding_agent in ['codex', 'both', 'claude'] %}
+      args:
+{% if cookiecutter.coding_agent in ['codex', 'both'] %}
+        CODEX_VERSION: ${CODEX_VERSION:?run make agent-versions}
+{% endif %}
+{% if cookiecutter.coding_agent in ['claude', 'both'] %}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:?run make agent-versions}
+{% endif %}
+{% endif %}
     user: "1000:1000"
     userns_mode: "keep-id:uid=1000,gid=1000"
     working_dir: /workspace

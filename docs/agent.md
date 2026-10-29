@@ -65,8 +65,11 @@ agent-controlled code. Source edits are normal reviewed host changes.
 
 Build files are committed for direct inspection. `make agent-sync` refreshes
 one multi-stage Containerfile and four profile Compose manifests from generator
-sources; a test checks exact agreement. Versions have a single source in the
-generator Containerfile. The Python dependencies always come from root
+sources; a test checks exact agreement. Harness versions have a single source in
+`{{cookiecutter.project_slug}}/containers/harness-versions.env`; the master
+`containers/harness-versions.env` is a relative symlink to that file. Both
+updates and `make agent-sync` preserve this link, so a master update changes
+the generated-project default in the same Git diff. The Python dependencies always come from root
 `pyproject.toml`, `uv.lock`, and `.python-version`; startup runs `uv sync --locked`
 in `/opt/venv`, isolated from the host `.venv`. No hand-maintained second Python
 environment is baked into the image.
@@ -110,7 +113,8 @@ security boundary. Never use that command directly on the host checkout.
 
 `agent-stop` stops the container. `agent-clean` removes the stack/network,
 preserving clone, state and all named volumes, including authentication.
-`agent-rebuild` stops and rebuilds the image, preserving work and credentials.
+`agent-rebuild` requires a stopped sandbox and transactionally rebuilds the image,
+preserving work and credentials.
 After applying commits, the next start safely refreshes an idle completed session.
 
 ## Agent session lifecycle
@@ -287,3 +291,111 @@ After successful manual acceptance, perform the next ticket entirely via
 `make agent` without starting Docker bootstrap. Only then may you manually remove
 the historical untracked Docker files. Docker remains a supported **dev runtime
 for generated projects**; this migration does not remove that choice.
+
+## Updating coding harnesses
+
+Harness updates are managed by the Podman image lifecycle rather than by
+modifying the running container. Harness binaries are image-managed,
+credentials are volume-managed, and the workspace is Git-managed.
+
+`containers/harness-versions.env` records explicit stable npm versions. Commit
+its changes to reproduce the environment later. Host `CODEX_VERSION` /
+`CLAUDE_CODE_VERSION` variables and `.env` cannot override these pins.
+`agent-start` builds a missing image using the pins; it never resolves `latest`.
+An existing image is updated only through an explicit update or rebuild.
+
+On the host:
+
+```bash
+make agent-versions       # Configured and installed versions; no Internet lookup
+make agent-update-check   # Read-only npm registry lookup; network required
+make agent-stop           # Exit the interactive session first
+make agent-update         # Resolve and update all harnesses in this profile
+make agent-start
+make agent-versions
+```
+
+Provider targets are available only when included in the profile:
+
+```bash
+make agent-update-codex
+make agent-update-claude
+# Controlled upgrade, downgrade, or rollback:
+make agent-update-codex VERSION=0.165.0
+make agent-update-claude VERSION=2.1.311
+```
+
+Without `VERSION`, the registry's stable `latest` tag is resolved to an explicit
+`X.Y.Z` pin. Only stable numeric versions are accepted. `VERSION` applies to a
+single provider target; omit it for `agent-update`. `agent-update-check` compares
+the configured pins to the registry; use `agent-versions` to inspect an older
+installed image. Network failures leave the pins and runtime untouched.
+
+Updates and `agent-rebuild` require a stopped container, conservatively treating
+any running agent container as in use. Under the host lifecycle lock they build
+a separately tagged candidate, then run each installed CLI's `--version` as UID
+1000 without a network or credentials. The build itself also asserts the exact
+version. Only after all probes pass are the image tag and pins activated.
+If activation fails, the old pins and image tag are restored and the old
+container is recreated when one existed. If host/engine failure also prevents
+recovery, inspect the reported error, restore the recorded pin from Git, then
+retry `make agent-rebuild`; do not delete the workspace or credential volumes.
+
+An existing stopped agent container is recreated, verified and left stopped;
+if none exists, creation waits for `agent-start`. No clone, reset, checkout,
+rebase, or Python synchronization runs during a harness rebuild. Workspace,
+`.agent/state.json`, named credential volumes and saved ports are retained.
+Port collisions during recreation can fail activation safely; free the saved
+port before retrying. Normal startup retains its existing port fallback.
+A later commit of the pins uses the normal HEAD/session refresh rules:
+unapplied work continues to block automatic workspace refresh.
+
+`agent-check` warns when configured and installed versions differ and suggests
+`make agent-rebuild`. A configuration-only report remains available with no
+container/image or Podman engine. Custom profiles expose `agent-rebuild`, with
+no automatic management of unknown harnesses. The `none` profile has no agent
+update targets.
+
+Codex retains `--no-daemon`. Its launcher passes the officially supported
+[`check_for_update_on_startup=false`](https://developers.openai.com/codex/config-reference)
+configuration so existing credential volumes also avoid startup update prompts.
+Claude Code retains the official
+[`DISABLE_AUTOUPDATER=1`](https://code.claude.com/docs/en/env-vars)
+setting because deployment manages its updates. Direct manual self-update
+commands are unnecessary and may fail against the immutable system install.
+Neither harness gains root, sudo, capabilities, host HOME, an engine socket,
+or write access to `/usr/local/bin` or `/usr/local/lib/node_modules`.
+
+Node/npm also belong to the image. Ignore npm self-update notifications inside
+the agent; update Node/npm by changing the Containerfile and rebuilding.
+Old image layers are retained. Optional host maintenance: `podman image prune`
+after reviewing unused images. No automatic system-wide prune runs.
+
+### Codex update fails with EACCES under /usr/local/lib/node_modules
+
+The npm global install is owned by root at image build time. The runtime runs
+as non-root `agent`, so an in-session `npm install -g @openai/codex` cannot
+replace it. This permission boundary is intentional. From the host, use:
+
+```bash
+exit                      # Leave Codex
+make agent-stop
+make agent-update-codex
+make agent-codex           # Or make agent for a Codex-only generated project
+```
+
+Do not use `sudo npm install -g @openai/codex` or make system npm directories
+writable. Apply the same image lifecycle to Claude Code updates.
+
+### Manual WSL update and persistence validation
+
+On a rootless Podman WSL/Linux host, run `make agent-versions` and
+`make agent-update-check`. If an update exists, exit the harness, stop the
+container, update the provider, then start and check the installed versions.
+Reopen Codex and Claude sequentially and confirm both existing logins survive
+without a new authentication flow. For repeatable rollback testing use an
+explicit older `VERSION`, then restore the desired pin. Runtime pytest tests
+use non-secret sentinels in both credential volumes, preserve a workspace file
+and state across rebuild/recreation, and verify CLI versions and non-root
+permissions. They skip when a usable rootless engine is unavailable; real
+account persistence requires this manual validation.

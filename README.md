@@ -254,9 +254,12 @@ Références vérifiées lors de l’implémentation :
 - [Installation uv en CI GitHub](https://docs.astral.sh/uv/guides/integration/github/)
 - [Codex CLI officiel](https://learn.chatgpt.com/docs/codex/cli)
 
-Les versions critiques sont centralisées dans les arguments du Containerfile
-(CODEX_VERSION ou CLAUDE_CODE_VERSION, Node partagé, OH_MY_ZSH_COMMIT pour dev).
-Mettez à jour ces pins et reconstruisez pour changer de version. Les tags d’images système et
+Les versions Codex et Claude Code sont centralisées dans
+`containers/harness-versions.env` (lien vers la source générateur dans le maître).
+Utilisez `make agent-versions`, `make agent-update-check`, puis, après
+`make agent-stop`, `make agent-update` ou `make agent-update-codex VERSION=X.Y.Z`
+pour un changement transactionnel. Voir [Updating coding harnesses](docs/agent.md#updating-coding-harnesses).
+Node et OH_MY_ZSH_COMMIT restent gérés par le Containerfile. Les tags d’images système et
 paquets apt ne sont pas immuables ; voir la documentation conteneurs générée
 pour le durcissement par digests et la maintenance des versions.
 

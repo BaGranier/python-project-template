@@ -923,6 +923,7 @@ def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
                 "agent-login-claude",
             ):
                 assert target in help_text
+    command(project, "make", "setup")
     command(project, "make", "init", env=git_identity_environment(tmp_path))
     command(project, "make", "check")
     command(project, "make", "build")
@@ -958,7 +959,13 @@ def test_login_and_launch_dispatch(
     project = generate(tmp_path, coding_agent=provider)
     helper = configure_agent(project)
     expected_launch = (
-        ("codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox")
+        (
+            "codex",
+            "--no-daemon",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c",
+            "check_for_update_on_startup=false",
+        )
         if provider == "codex"
         else ("claude", "--dangerously-skip-permissions")
     )
@@ -1201,6 +1208,21 @@ def test_agent_container_runtime(
             helper.compose("exec", "-T", "agent", "touch", sentinel_path)
         command(project, "make", "agent-refresh")
         command(project, "make", "agent-start")
+        for sentinel_path in config_sentinels:
+            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
+        command(project, "make", "agent-stop")
+        (helper.WORKSPACE / "harness-work.txt").write_text("preserve workspace\n")
+        saved_state = helper.STATE.read_bytes()
+        command(project, "make", "agent-rebuild")
+        assert helper.STATE.read_bytes() == saved_state
+        assert (helper.WORKSPACE / "harness-work.txt").read_text() == "preserve workspace\n"
+        command(project, "make", "agent-start")
+        for name, agent in helper.AGENTS.items():
+            actual = helper.compose("exec", "-T", "agent", agent.cli, "--version", capture=True)
+            assert (
+                helper.parsed_version(name, actual)
+                == helper.harness_versions()[helper.VERSION_KEYS[name]]
+            )
         for sentinel_path in config_sentinels:
             helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
         if provider == "custom":

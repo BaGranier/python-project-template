@@ -6,6 +6,15 @@ services:
       context: ..
       dockerfile: containers/Containerfile
       target: both
+
+      args:
+
+        CODEX_VERSION: ${CODEX_VERSION:?run make agent-versions}
+
+
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:?run make agent-versions}
+
+
     user: "1000:1000"
     userns_mode: "keep-id:uid=1000,gid=1000"
     working_dir: /workspace

@@ -33,13 +33,14 @@ def runtime_source(profile: str) -> str:
     return (
         render("scripts/agent.py", profile)
         .replace("containers/compose.agent.yaml", f"containers/{filename}")
+        .replace('BUILD_TARGET = "agent"', f'BUILD_TARGET = "{profile}"')
         .replace('print(f"Agent:', 'print(f"Template agent:')
         .replace('print(f"Default provider:', 'print(f"Selected provider:')
     )
 
 
 def artifacts() -> dict[str, str]:
-    # One shared base; only final provider stages differ. Pins remain in the generator source.
+    # One shared base; only final provider stages differ. Harness pins use a shared source file.
     shared, _ = render("containers/Containerfile", "both").split("FROM agent-base AS agent\n")
     containerfile = shared
     files = {}
@@ -50,6 +51,7 @@ def artifacts() -> dict[str, str]:
         files[f"containers/{filename}"] = render("containers/compose.agent.yaml", profile).replace(
             "target: agent", f"target: {profile}"
         )
+    files["containers/harness-versions.env"] = render("containers/harness-versions.env", "both")
     files["containers/Containerfile"] = containerfile
     files["CLAUDE.md"] = (ROOT / "AGENTS.md").read_text()
     files["docs/podman.md"] = render("docs/podman.md", "both")
@@ -67,7 +69,11 @@ def main() -> None:
                 raise SystemExit(f"Stale {filename}; run make agent-sync.")
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            if filename == "containers/harness-versions.env":
+                path.unlink(missing_ok=True)
+                path.symlink_to("../{{cookiecutter.project_slug}}/containers/harness-versions.env")
+            else:
+                path.write_text(content)
 
 
 if __name__ == "__main__":

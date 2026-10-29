@@ -28,6 +28,10 @@ def temporary_master(path: Path) -> Path:
     path.mkdir()
     (path / ".gitignore").write_text(".agent/\n.venv/\n.env\n")
     (path / "important.txt").write_text("primary checkout\n")
+    (path / "containers").mkdir()
+    shutil.copyfile(
+        ROOT / "containers/harness-versions.env", path / "containers/harness-versions.env"
+    )
     initialize(path)
     return path
 
@@ -182,8 +186,31 @@ def test_master_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         helper.compose("exec", "-T", "agent", "make", "check")
         for agent in helper.AGENTS.values():
             helper.compose("exec", "-T", "agent", "touch", agent.config_dir + "/sentinel")
-        helper.compose("down")
+        helper.compose("stop")
+        (helper.WORKSPACE / "harness-work.txt").write_text("preserve workspace\n")
+        saved_state = helper.STATE.read_bytes()
+        pins = helper.harness_versions()
+        helper.update("codex", pins["CODEX_VERSION"])
+        assert helper.STATE.read_bytes() == saved_state
+        assert (helper.WORKSPACE / "harness-work.txt").read_text() == "preserve workspace\n"
+        before = helper.VERSIONS_FILE.read_bytes()
+        with pytest.raises(subprocess.CalledProcessError):
+            helper.update("codex", "999999.0.0")
+        assert helper.VERSIONS_FILE.read_bytes() == before
+        assert helper.STATE.read_bytes() == saved_state
         helper.start()
+        for name, agent in helper.AGENTS.items():
+            actual = helper.compose("exec", "-T", "agent", agent.cli, "--version", capture=True)
+            assert helper.parsed_version(name, actual) == pins[helper.VERSION_KEYS[name]]
+        helper.compose(
+            "exec",
+            "-T",
+            "agent",
+            "python",
+            "-c",
+            "import os; assert not os.access('/usr/local/bin', os.W_OK); "
+            "assert not os.access('/usr/local/lib/node_modules', os.W_OK)",
+        )
         for agent in helper.AGENTS.values():
             helper.compose("exec", "-T", "agent", "test", "-f", agent.config_dir + "/sentinel")
         helper.compose("exec", "-T", "agent", "curl", "--fail", "-I", "https://example.com")

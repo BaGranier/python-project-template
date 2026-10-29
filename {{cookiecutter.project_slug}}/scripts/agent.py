@@ -20,11 +20,15 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
+from urllib.request import urlopen
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".agent"
 WORKSPACE = STATE_DIR / "workspace"
 STATE = STATE_DIR / "state.json"
+VERSIONS_FILE = ROOT / "containers/harness-versions.env"
+BUILD_TARGET = "agent"
 PROFILE = "{{ cookiecutter.coding_agent }}"
 IMAGE = "localhost/{{ cookiecutter.project_slug }}-agent:template-v2-{{ cookiecutter.coding_agent }}"
 
@@ -45,7 +49,13 @@ AGENTS: dict[str, CodingAgent] = {}
     "codex",
     "/home/agent/.codex",
     ("codex", "login", "--device-auth"),
-    ("codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"),
+    (
+        "codex",
+        "--no-daemon",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        "check_for_update_on_startup=false",
+    ),
 )
 {% endif %}{% if cookiecutter.coding_agent in ['claude', 'both'] %}AGENTS["claude"] = CodingAgent(
     "Claude Code",
@@ -623,6 +633,8 @@ def environment(*, preferred: bool = False) -> dict[str, str]:
         for key in PORTS:
             if service_name(key) in effective:
                 env[key] = str(effective[service_name(key)])
+    if AGENTS and VERSIONS_FILE.exists():
+        env.update(harness_versions())
     env["AGENT_WORKSPACE"] = str(WORKSPACE)
     provider = shutil.which("podman-compose")
     if provider:
@@ -815,7 +827,7 @@ def check(*, inspect_image: bool = True) -> None:
         raise ValueError(
             "podman-compose is unavailable. Install it on the host; see docs/podman.md."
         )
-    report_profile()
+    versions()
     default_provider()
     print("Podman: available\nRootless: true")
     print(f"Compose provider: {provider}")
@@ -869,12 +881,277 @@ def check(*, inspect_image: bool = True) -> None:
         raise ValueError("Podman could not inspect the selected agent image.")
 
 
-def rebuild() -> None:
+VERSION_KEYS = {"codex": "CODEX_VERSION", "claude": "CLAUDE_CODE_VERSION"}
+PACKAGES = {"codex": "@openai/codex", "claude": "@anthropic-ai/claude-code"}
+
+
+def validate_version(value: str) -> str:
+    # Stable npm versions only. No tags, ranges, shell syntax, or build options.
+    if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value):
+        raise ValueError(f"Invalid harness version {value!r}; expected a stable X.Y.Z version.")
+    return value
+
+
+def harness_versions() -> dict[str, str]:
+    values = {}
+    for line in VERSIONS_FILE.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or key not in VERSION_KEYS.values() or key in values:
+            raise ValueError("Invalid or duplicate entry in harness-versions.env.")
+        values[key] = validate_version(value)
+    for name in AGENTS:
+        if VERSION_KEYS[name] not in values:
+            raise ValueError(f"Missing pin for {name} in harness-versions.env.")
+    return values
+
+
+def latest_version(name: str) -> str:
+    # Host-side HTTPS with a finite timeout. Never evaluate registry data as code.
+    with urlopen(f"https://registry.npmjs.org/{PACKAGES[name]}/latest", timeout=30) as response:
+        return validate_version(json.load(response)["version"])
+
+
+def parsed_version(name: str, output: str) -> str:
+    pattern = (
+        r"codex-cli (\d+\.\d+\.\d+)" if name == "codex" else r"(\d+\.\d+\.\d+) \(Claude Code\)"
+    )
+    match = re.fullmatch(pattern, output.strip())
+    if match is None:
+        raise ValueError(f"Unexpected {name} --version output: {output!r}")
+    return validate_version(match[1])
+
+
+def image_version(image: str, name: str) -> str:
+    return parsed_version(
+        name,
+        run(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "--pull=never",
+                "--network=none",
+                "--user",
+                "1000:1000",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                image,
+                AGENTS[name].cli,
+                "--version",
+            ],
+            capture=True,
+        ),
+    )
+
+
+def versions() -> None:
+    report_profile()
+    configured = harness_versions() if AGENTS else {}
+    container = None
+    available = False
+    if AGENTS and shutil.which("podman"):
+        try:
+            container = agent_container()
+            available = (
+                subprocess.run(
+                    ["podman", "image", "exists", IMAGE],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
+                == 0
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    for name, agent in AGENTS.items():
+        installed = "unavailable (image/container not available)"
+        if container is not None and container["State"]["Running"]:
+            installed = parsed_version(
+                name,
+                compose(
+                    "exec",
+                    "-T",
+                    "agent",
+                    agent.cli,
+                    "--version",
+                    capture=True,
+                ),
+            )
+        elif container is not None or available:
+            installed = image_version(container["Image"] if container else IMAGE, name)
+        pin = configured[VERSION_KEYS[name]]
+        print(f"\n{agent.name}:\n  configured: {pin}\n  installed:  {installed}")
+        if installed != pin and not installed.startswith("unavailable"):
+            print(
+                f"WARNING: Configured {agent.name} version differs from the running image."
+                "\nRun:\n\n    make agent-rebuild"
+            )
+
+
+def update_check() -> None:
+    configured = harness_versions()
+    report_profile()
+    for name, agent in AGENTS.items():
+        current = configured[VERSION_KEYS[name]]
+        latest = latest_version(name)
+        status = (
+            "up to date"
+            if latest == current
+            else "update available"
+            if tuple(map(int, latest.split("."))) > tuple(map(int, current.split(".")))
+            else "configured version is newer"
+        )
+        print(
+            f"{agent.name}:\n  configured:       {current}"
+            f"\n  latest available: {latest}\n  {status}"
+        )
+
+
+def require_stopped() -> dict[str, Any] | None:
+    container = agent_container()
+    if container is not None and container["State"]["Running"]:
+        raise ValueError(
+            "Agent container is currently in use.\n"
+            "Stop the interactive session before updating:\n\n"
+            "    make agent-stop\n    make agent-update (or make agent-rebuild)"
+        )
+    return container
+
+
+def write_pins(content: str) -> None:
+    # Resolve the master's shared-source symlink, and replace the file atomically.
+    path = VERSIONS_FILE.resolve()
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary.chmod(path.stat().st_mode & 0o777)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def rebuild(*, updates: dict[str, str] | None = None) -> None:
     check(inspect_image=False)
-    if agent_container() is not None:
-        compose("stop")
-    compose("build")
-    print("Agent image rebuilt; clone and volumes preserved. Run make agent-start or make agent.")
+    container = require_stopped()
+    if STATE.exists():
+        read_state()  # Check profile without refreshing/rebasing the Git workspace.
+    pins = harness_versions() if AGENTS else {}
+    original = VERSIONS_FILE.read_text() if AGENTS else ""
+    desired = dict(pins)
+    desired.update(updates or {})
+    candidate = IMAGE + "-candidate-" + uuid4().hex
+    args = [
+        "podman",
+        "build",
+        "--target",
+        BUILD_TARGET,
+        "--file",
+        str(ROOT / "containers/Containerfile"),
+        "--tag",
+        candidate,
+    ]
+    for name in AGENTS:
+        key = VERSION_KEYS[name]
+        args.extend(["--build-arg", f"{key}={validate_version(desired[key])}"])
+    previous = None
+    present = subprocess.run(["podman", "image", "exists", IMAGE], check=False)
+    if present.returncode == 0:
+        previous = run(
+            ["podman", "image", "inspect", "--format", "{{ '{{' }}.Id{{ '}}' }}", IMAGE],
+            capture=True,
+        )
+    elif present.returncode != 1:
+        raise ValueError("Podman could not inspect the selected agent image.")
+    activated = False
+    try:
+        print("Building candidate agent image...", flush=True)
+        run([*args, str(ROOT)])
+        for name in AGENTS:
+            if image_version(candidate, name) != desired[VERSION_KEYS[name]]:
+                raise ValueError(f"Candidate {name} version differs from the requested pin.")
+        require_stopped()  # Recheck after a potentially long build.
+        if AGENTS and VERSIONS_FILE.read_text() != original:
+            raise ValueError("Harness pins changed during the build; retry after review.")
+        if updates:
+            content = original
+            for key, value in updates.items():
+                content = re.sub(rf"(?m)^{key}=.*$", f"{key}={value}", content)
+            write_pins(content)
+        activated = True
+        run(["podman", "tag", candidate, IMAGE])
+        if container is not None:
+            # No down --volumes, no prepare/start/uv sync, no Git operation.
+            # Recreate only the agent service and leave it stopped after verification.
+            compose("up", "-d", "--no-build", "--force-recreate", "agent")
+            try:
+                for name, agent in AGENTS.items():
+                    actual = parsed_version(
+                        name,
+                        compose(
+                            "exec",
+                            "-T",
+                            "agent",
+                            agent.cli,
+                            "--version",
+                            capture=True,
+                        ),
+                    )
+                    if actual != desired[VERSION_KEYS[name]]:
+                        raise ValueError(f"Activated {name} version differs from its pin.")
+            finally:
+                compose("stop", "agent")
+        for name, agent in AGENTS.items():
+            key = VERSION_KEYS[name]
+            print(f"{agent.name}: {pins[key]} → {desired[key]}")
+        print(
+            "Credentials: preserved\nWorkspace: preserved\nState: preserved\n"
+            "Agent image ready. Run make agent-start or make agent."
+        )
+    except BaseException:
+        if activated:
+            try:
+                if updates:
+                    write_pins(original)
+            finally:
+                if previous:
+                    run(["podman", "tag", previous, IMAGE])
+                else:
+                    run(["podman", "untag", IMAGE])
+                if container is not None and previous:
+                    compose("up", "-d", "--no-build", "--force-recreate", "agent")
+                    compose("stop", "agent")
+        raise
+    finally:
+        # Remove only our temporary tag; retain previous images/layers for recovery.
+        subprocess.run(
+            ["podman", "untag", candidate],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+def update(provider: str | None, version: str | None) -> None:
+    if not AGENTS:
+        raise ValueError("This profile has no managed official harnesses; use agent-rebuild.")
+    names = [provider] if provider else list(AGENTS)
+    if any(name not in AGENTS for name in names):
+        raise ValueError(f"Harness is not installed by profile {PROFILE!r}.")
+    if version is not None and not provider:
+        raise ValueError("VERSION requires agent-update-codex or agent-update-claude.")
+    if version is not None:
+        validate_version(version)
+    require_stopped()
+    targets = {
+        VERSION_KEYS[name]: version if version is not None else latest_version(name)
+        for name in names
+    }
+    rebuild(updates=targets)
 
 
 def start() -> None:
@@ -1003,6 +1280,9 @@ def main() -> None:
             "check",
             "start",
             "rebuild",
+            "versions",
+            "update-check",
+            "update",
             "refresh",
             "rebase",
             "archive",
@@ -1019,13 +1299,14 @@ def main() -> None:
         ],
     )
     parser.add_argument("--provider", choices=["codex", "claude"])
+    parser.add_argument("--version", default=os.environ.get("VERSION"))
     options = parser.parse_args()
     command = options.command
     try:
         agent = None
         argv: tuple[str, ...] = ()
-        if options.provider and command not in {"run", "login"}:
-            raise ValueError("--provider is only supported for run/login.")
+        if options.provider and command not in {"run", "login", "update"}:
+            raise ValueError("--provider is only supported for run/login/update.")
         if command in {"run", "login"}:
             agent = selected_agent(options.provider)
             if PROFILE == "custom":
@@ -1034,9 +1315,17 @@ def main() -> None:
                         "Custom authentication is harness-specific; use make agent-shell."
                     )
                 argv = custom_command()
+        if command == "versions":
+            versions()
+            return
+        if command == "update-check":
+            update_check()
+            return
         with locked():
             if command == "check":
                 check()
+            elif command == "update":
+                update(options.provider, options.version)
             elif command == "rebuild":
                 rebuild()
             elif command == "refresh":

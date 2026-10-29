@@ -124,17 +124,16 @@ def test_custom_failure_does_not_echo_arguments(
     assert "private-test-argument" not in str(caught.value)
 
 
-def test_rebuild_preserves_workspace_and_volumes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rebuild_refuses_running_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = template.generate(tmp_path, coding_agent="custom")
     helper = template.configure_agent(project)
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(helper, "check", lambda **kwargs: calls.append((str(kwargs),)))
     monkeypatch.setattr(helper, "agent_container", lambda: {"State": {"Running": True}})
     monkeypatch.setattr(helper, "compose", lambda *args: calls.append(args))
-    helper.rebuild()
-    assert calls == [("{'inspect_image': False}",), ("stop",), ("build",)]
+    with pytest.raises(ValueError, match="currently in use"):
+        helper.rebuild()
+    assert calls == [("{'inspect_image': False}",)]
 
 
 @pytest.mark.parametrize("old,new", [("codex", "both"), ("claude", "both"), ("custom", "codex")])
