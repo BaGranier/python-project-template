@@ -1,0 +1,36 @@
+name: python-project-template-agent
+services:
+  agent:
+    image: localhost/python-project-template-agent:template-v2-codex
+    build:
+      context: ..
+      dockerfile: containers/Containerfile
+      target: codex
+    user: "1000:1000"
+    userns_mode: "keep-id:uid=1000,gid=1000"
+    working_dir: /workspace
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    volumes:
+      - ${AGENT_WORKSPACE:?run make agent-start}:/workspace:Z
+      - agent-venv:/opt/venv
+      - agent-cache:/home/agent/.cache/uv
+
+      - agent-codex-home:/home/agent/.codex
+
+
+
+    ports:
+      - "127.0.0.1:${AGENT_APP_PORT:-18000}:8000"
+
+
+    stdin_open: true
+    tty: true
+volumes:
+  agent-venv:
+  agent-cache:
+
+  agent-codex-home:
+    name: python-project-template-agent-codex-home

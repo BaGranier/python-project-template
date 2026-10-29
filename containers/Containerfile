@@ -1,0 +1,100 @@
+ARG UV_VERSION=0.13.5
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM python:3.12-slim-bookworm AS base
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates build-essential make curl bash zsh \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /bin/bash agent \
+    && mkdir -p /opt/venv /home/agent/.cache/uv /workspace \
+    && chown -R agent:agent /opt/venv /home/agent /workspace
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_CACHE_DIR=/home/agent/.cache/uv \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1
+WORKDIR /workspace
+
+FROM base AS dev
+
+USER agent
+CMD ["sleep", "infinity"]
+
+
+FROM node:22.22.0-bookworm-slim AS node
+FROM base AS agent-base
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+RUN mkdir -p /opt/agent-tools/bin /home/agent/.local/bin /home/agent/.config \
+    && chown -R agent:agent /opt/agent-tools /home/agent/.local /home/agent/.config
+ENV PATH=/opt/agent-tools/bin:/home/agent/.local/bin:$PATH
+RUN node --version && npm --version
+
+
+FROM agent-base AS codex
+
+ARG CODEX_VERSION=0.164.0
+RUN npm install --global @openai/codex@${CODEX_VERSION} \
+    && npm cache clean --force \
+    && codex --version
+ENV CODEX_HOME=/home/agent/.codex
+RUN mkdir -p "$CODEX_HOME" \
+    && printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml" \
+    && chown -R agent:agent "$CODEX_HOME"
+
+
+
+USER agent
+CMD ["sleep", "infinity"]
+
+FROM agent-base AS claude
+
+
+ARG CLAUDE_CODE_VERSION=2.1.311
+RUN npm install --global @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force \
+    && claude --version
+ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
+    DISABLE_AUTOUPDATER=1
+RUN mkdir -p "$CLAUDE_CONFIG_DIR" && chown -R agent:agent "$CLAUDE_CONFIG_DIR"
+
+
+USER agent
+CMD ["sleep", "infinity"]
+
+FROM agent-base AS both
+
+ARG CODEX_VERSION=0.164.0
+RUN npm install --global @openai/codex@${CODEX_VERSION} \
+    && npm cache clean --force \
+    && codex --version
+ENV CODEX_HOME=/home/agent/.codex
+RUN mkdir -p "$CODEX_HOME" \
+    && printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml" \
+    && chown -R agent:agent "$CODEX_HOME"
+
+
+ARG CLAUDE_CODE_VERSION=2.1.311
+RUN npm install --global @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm cache clean --force \
+    && claude --version
+ENV CLAUDE_CONFIG_DIR=/home/agent/.claude \
+    DISABLE_AUTOUPDATER=1
+RUN mkdir -p "$CLAUDE_CONFIG_DIR" && chown -R agent:agent "$CLAUDE_CONFIG_DIR"
+
+
+USER agent
+CMD ["sleep", "infinity"]
+
+FROM agent-base AS custom
+
+
+
+COPY containers/agent-custom-install.sh /tmp/agent-custom-install.sh
+ENV NPM_CONFIG_PREFIX=/home/agent/.local
+USER agent
+RUN NPM_CONFIG_PREFIX=/opt/agent-tools bash /tmp/agent-custom-install.sh
+
+USER agent
+CMD ["sleep", "infinity"]

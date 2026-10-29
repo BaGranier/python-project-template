@@ -14,3 +14,10 @@ Valid template source alone is insufficient: generate a real project and run
 Never claim unavailable runtime/container checks passed. No push without request.
 Agent sandbox changes must preserve rootless Podman, an independent Git clone,
 non-root execution, no engine socket or host HOME, and explicit commit recovery.
+
+The master dogfoods the same lifecycle: `make agent` uses an independent
+`.agent/workspace` clone and defaults to both harnesses. Never expose a host
+engine socket to run integration tests. Runtime tests skip when the engine is
+intentionally unavailable; report those skips. See `docs/agent.md` for host
+validation and recovery. After editing shared sandbox sources, run
+`make agent-sync` and verify the generated master build files.

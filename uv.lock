@@ -754,6 +754,7 @@ source = { virtual = "." }
 dev = [
     { name = "cookiecutter" },
     { name = "cruft" },
+    { name = "jinja2" },
     { name = "jupytext" },
     { name = "mypy" },
     { name = "pytest" },
@@ -769,6 +770,7 @@ lint = [
 test = [
     { name = "cookiecutter" },
     { name = "cruft" },
+    { name = "jinja2" },
     { name = "jupytext" },
     { name = "pytest" },
     { name = "pyyaml" },
@@ -780,6 +782,7 @@ test = [
 dev = [
     { name = "cookiecutter", specifier = ">=2.6,<3" },
     { name = "cruft", specifier = ">=2.6,<3" },
+    { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "jupytext", specifier = ">=1.16,<2" },
     { name = "mypy", specifier = ">=1.15,<2" },
     { name = "pytest", specifier = ">=8,<10" },
@@ -795,6 +798,7 @@ lint = [
 test = [
     { name = "cookiecutter", specifier = ">=2.6,<3" },
     { name = "cruft", specifier = ">=2.6,<3" },
+    { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "jupytext", specifier = ">=1.16,<2" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pyyaml", specifier = ">=6,<7" },

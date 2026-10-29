@@ -30,6 +30,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def command(path: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    # A sandbox uses /opt/venv for the generator itself. Child projects must
+    # never synchronize into that environment and uninstall the running tools.
+    env = dict(os.environ if env is None else env)
+    if path != ROOT and (path / "pyproject.toml").exists():
+        env["UV_PROJECT_ENVIRONMENT"] = str(path / ".venv")
     result = subprocess.run(
         list(args), cwd=path, env=env, text=True, capture_output=True, check=False
     )

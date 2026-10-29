@@ -35,13 +35,34 @@ Jupytext et MkDocs Material. Le README généré expose les commandes usuelles ;
 les détails et décisions sont versionnés dans `docs/` si activé.
 Les composants désactivés sont retirés, ainsi que leurs groupes et cibles Make.
 
-Développer le template :
+Developing the template :
 
 ```bash
 cd ~/python-project-template
 make setup
 make check
+make agent-check
+make agent-login
+make agent
 ```
+
+Le maître dogfoode maintenant sa propre sandbox Podman rootless, par défaut
+avec le profil `both`. L’agent développe **ce dépôt**, dans le clone indépendant
+`.agent/workspace` ; aucun projet généré imbriqué ne sert de source de vérité.
+`make agent-codex` et `make agent-claude` partagent ce clone. La configuration
+locale `.env` choisit `AGENT_PROFILE` et `AGENT_DEFAULT_PROVIDER` ; `custom` est
+aussi disponible. Le lifecycle, les ports et la récupération Git réutilisent
+directement les sources du générateur. Après une modification des sources
+partagées, `make agent-sync` synchronise les fichiers de build du maître.
+
+Consultez le [guide de développement dans la sandbox](docs/agent.md) pour la
+validation hôte, les logins séparés, le test fonctionnel commit/diff/test/apply,
+les volumes persistants et la transition depuis Docker. Les tests runtime
+Podman restent volontairement **sur l’hôte** : aucun socket moteur n’est monté
+dans l’agent pour les exécuter. `make check` affiche leurs skips dans la sandbox.
+Docker n’est pas requis pour ce workflow. Les fichiers bootstrap locaux sont
+préservés jusqu’à validation manuelle ; ne les supprimez pas prématurément.
+Les projets générés conservent leur choix de runtime dev Docker.
 
 Générer une démonstration pour inspection et smoke tests :
 
