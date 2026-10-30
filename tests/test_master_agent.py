@@ -186,7 +186,24 @@ def test_master_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         helper.compose("exec", "-T", "agent", "make", "check")
         for agent in helper.AGENTS.values():
             helper.compose("exec", "-T", "agent", "touch", agent.config_dir + "/sentinel")
-        helper.compose("stop")
+        for path in ("/home/agent/.cache/uv", "/opt/venv"):
+            helper.compose("exec", "-T", "agent", "touch", path + "/persistent-sentinel")
+        helper.compose("exec", "-T", "agent", "mkdir", "-p", "/tmp/template-disposable-test")
+        helper.compose(
+            "exec",
+            "-T",
+            "agent",
+            "dd",
+            "if=/dev/zero",
+            "of=/tmp/template-disposable-test/blob",
+            "bs=1M",
+            "count=100",
+        )
+        stop_state = helper.STATE.read_bytes()
+        monkeypatch.setattr(sys, "argv", ["agent.py", "stop"])
+        helper.main()
+        assert helper.agent_container() is None
+        assert helper.STATE.read_bytes() == stop_state
         (helper.WORKSPACE / "harness-work.txt").write_text("preserve workspace\n")
         saved_state = helper.STATE.read_bytes()
         pins = helper.harness_versions()
@@ -199,6 +216,11 @@ def test_master_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         assert helper.VERSIONS_FILE.read_bytes() == before
         assert helper.STATE.read_bytes() == saved_state
         helper.start()
+        helper.compose(
+            "exec", "-T", "agent", "test", "!", "-e", "/tmp/template-disposable-test/blob"
+        )
+        for path in ("/home/agent/.cache/uv", "/opt/venv"):
+            helper.compose("exec", "-T", "agent", "test", "-f", path + "/persistent-sentinel")
         for name, agent in helper.AGENTS.items():
             actual = helper.compose("exec", "-T", "agent", agent.cli, "--version", capture=True)
             assert helper.parsed_version(name, actual) == pins[helper.VERSION_KEYS[name]]

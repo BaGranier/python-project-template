@@ -252,3 +252,23 @@ legitimately own this port. Runtime tests must still pass with it running.
 References: [rootless tutorial](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md),
 [socket service](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html),
 [Compose providers](https://docs.podman.io/en/latest/markdown/podman-compose.1.html).
+
+{% if cookiecutter.coding_agent != 'none' %}
+## Disk usage and cleanup
+
+Run `make agent-disk` and `podman system df -v` to distinguish writable layers,
+images, persistent volumes, caches and the agent Git workspace. Successful
+pytest temporary projects are deleted; the last failed session is retained.
+`make test-disk-report` shows retained fixtures and generated `.venv` sizes.
+
+`agent-stop` removes this disposable runtime/network without deleting named
+volumes, credentials, `.agent/workspace` or `.agent/state.json`. A later start
+has a fresh `/tmp`. `agent-clean-temp` explicitly cleans known pytest data;
+`agent-clean-cache` explicitly cleans uv/npm caches inside the running agent.
+Neither command treats credentials, the workspace, state or venv as cache.
+Caches are not purged at stop. There is no persistent `/tmp` volume or tmpfs.
+
+See [Disk usage and cleanup](agent.md#disk-usage-and-cleanup) for measurement,
+one-time removal of reviewed obsolete containers, and host WSL stop/start
+validation. Never run global system/image/volume pruning to clean this project.
+{% endif %}

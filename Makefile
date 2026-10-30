@@ -7,6 +7,9 @@ setup: ## Install the template tooling
 	@test -e .env || cp .env.example .env
 shell: setup ## Open a child Bash/Zsh with the template environment
 	uv run python scripts/master_shell.py
+.PHONY: test-disk-report
+test-disk-report: ## Report retained pytest data and largest fixtures (read-only)
+	uv run python scripts/disk_usage.py pytest-report
 test: ## Run generation and Git isolation tests
 	uv run pytest
 lint: ## Lint template maintenance code
@@ -45,7 +48,15 @@ agent-test: ## Run make check inside the sandbox (host runtime tests may skip)
 	uv run python scripts/agent.py test
 agent-apply: ## Cherry-pick reviewed agent commits locally (stop first)
 	uv run python scripts/agent.py apply
-agent-stop: ## Stop this sandbox only
+
+.PHONY: agent-disk agent-clean-temp agent-clean-cache
+agent-disk: ## Diagnose project disk usage without deleting anything
+	uv run python scripts/agent.py disk
+agent-clean-temp: ## Delete retained pytest data inside the agent (tests must be idle)
+	uv run python scripts/agent.py clean-temp
+agent-clean-cache: ## Explicitly clean agent uv/npm caches; preserve credentials and work
+	uv run python scripts/agent.py clean-cache
+agent-stop: ## Remove disposable runtime; preserve workspace, state and volumes
 	uv run python scripts/agent.py stop
 agent-clean: ## Remove stack/network; preserve clone, state and credential volumes
 	uv run python scripts/agent.py clean

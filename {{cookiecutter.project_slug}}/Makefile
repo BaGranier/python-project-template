@@ -25,6 +25,9 @@ lint: ## Run Ruff lint
 	uv run ruff check .
 typecheck: ## Run strict mypy
 	uv run mypy
+.PHONY: test-disk-report
+test-disk-report: ## Report retained pytest data and largest fixtures (read-only)
+	uv run python scripts/disk_usage.py pytest-report
 test: ## Run all tests
 	uv run pytest
 test-unit: ## Run unit tests
@@ -122,7 +125,15 @@ agent-start: ## Start/resume and synchronize the sandbox
 	$(AGENT) start
 agent-shell: ## Open a shell in the running agent container
 	$(AGENT) shell
-agent-stop: ## Stop agent containers, preserve workspace and credentials
+
+.PHONY: agent-disk agent-clean-temp agent-clean-cache
+agent-disk: ## Diagnose project disk usage without deleting anything
+	$(AGENT) disk
+agent-clean-temp: ## Delete retained pytest data inside the agent (tests must be idle)
+	$(AGENT) clean-temp
+agent-clean-cache: ## Explicitly clean agent uv/npm caches; preserve credentials and work
+	$(AGENT) clean-cache
+agent-stop: ## Remove disposable runtime; preserve workspace, state and volumes
 	$(AGENT) stop
 agent-status: ## Show rootless/container/Git/port information
 	$(AGENT) status

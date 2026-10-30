@@ -268,3 +268,18 @@ Windows natif, PowerShell et cmd.exe : hors périmètre.
 
 Les fichiers locaux `Dockerfile.dev` et `docker-compose.yaml` du bootstrap ne
 font pas partie de l’architecture générée et ne sont pas versionnés par ce ticket.
+
+## Disk usage and cleanup
+
+Les temporaires pytest des tests réussis sont supprimés ; la dernière session
+échouée reste disponible pour diagnostic, y compris les erreurs setup/teardown.
+`make test-disk-report` mesure les fixtures et leurs `.venv` sans rien supprimer.
+`make agent-disk` distingue workspace, writable layer, images, caches et volumes.
+
+`make agent-stop` supprime désormais le runtime et son réseau, en conservant
+workspace Git, état, credentials, cache uv et venv dans leurs volumes.
+`make agent-clean-temp` supprime explicitement les temporaires pytest connus ;
+`make agent-clean-cache` nettoie uniquement les caches uv/npm recomposables.
+Aucun prune global, volume `/tmp` persistant ou tmpfs n’est ajouté.
+Voir [le guide disque](docs/agent.md#disk-usage-and-cleanup) pour les mesures,
+la récupération ponctuelle d’anciennes accumulations et la validation WSL.

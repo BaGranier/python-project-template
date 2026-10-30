@@ -52,6 +52,8 @@ def artifacts() -> dict[str, str]:
             "target: agent", f"target: {profile}"
         )
     files["containers/harness-versions.env"] = render("containers/harness-versions.env", "both")
+    files["tests/conftest.py"] = render("tests/conftest.py", "both")
+    files["scripts/disk_usage.py"] = render("scripts/disk_usage.py", "both")
     files["containers/Containerfile"] = containerfile
     files["CLAUDE.md"] = (ROOT / "AGENTS.md").read_text()
     files["docs/podman.md"] = render("docs/podman.md", "both")

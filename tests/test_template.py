@@ -1203,20 +1203,37 @@ def test_agent_container_runtime(
         helper.compose("exec", "-T", "agent", "npm", "--version")
         config_sentinels = [
             path + "/template-test-sentinel" for path in helper.PERSISTENT_PATHS.values()
-        ]
+        ] + ["/home/agent/.cache/uv/template-cache-sentinel", "/opt/venv/template-venv-sentinel"]
         for sentinel_path in config_sentinels:
             helper.compose("exec", "-T", "agent", "touch", sentinel_path)
         command(project, "make", "agent-refresh")
         command(project, "make", "agent-start")
         for sentinel_path in config_sentinels:
             helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
+        helper.compose("exec", "-T", "agent", "mkdir", "-p", "/tmp/template-disposable-test")
+        helper.compose(
+            "exec",
+            "-T",
+            "agent",
+            "dd",
+            "if=/dev/zero",
+            "of=/tmp/template-disposable-test/blob",
+            "bs=1M",
+            "count=100",
+        )
+        stop_state = helper.STATE.read_bytes()
         command(project, "make", "agent-stop")
+        assert helper.agent_container() is None
+        assert helper.STATE.read_bytes() == stop_state
         (helper.WORKSPACE / "harness-work.txt").write_text("preserve workspace\n")
         saved_state = helper.STATE.read_bytes()
         command(project, "make", "agent-rebuild")
         assert helper.STATE.read_bytes() == saved_state
         assert (helper.WORKSPACE / "harness-work.txt").read_text() == "preserve workspace\n"
         command(project, "make", "agent-start")
+        helper.compose(
+            "exec", "-T", "agent", "test", "!", "-e", "/tmp/template-disposable-test/blob"
+        )
         for name, agent in helper.AGENTS.items():
             actual = helper.compose("exec", "-T", "agent", agent.cli, "--version", capture=True)
             assert (

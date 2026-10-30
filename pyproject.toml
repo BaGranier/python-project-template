@@ -28,5 +28,7 @@ files = ["tests", "scripts"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = "1"
 testpaths = ["tests"]
 addopts = "-ra"

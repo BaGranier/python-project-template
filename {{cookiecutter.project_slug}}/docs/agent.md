@@ -143,7 +143,7 @@ make agent
 
 Rebuild requires a stopped stack (`make agent-stop` first), builds a candidate
 image, and keeps the clone, state and volumes. An existing container is recreated
-and left stopped after verification; the next start resumes it. If a session already exists,
+and disposed after verification; the next start recreates it. If a session already exists,
 review its work when primary HEAD changes. An idle clean session refreshes
 automatically; otherwise use `make agent-rebase` or `make agent-archive`. Never silently reset a
 clone to pick up a host commit. Empty CUSTOM_AGENT_COMMAND starts the sandbox
@@ -316,7 +316,7 @@ container is recreated when one existed. If host/engine failure also prevents
 recovery, inspect the reported error, restore the recorded pin from Git, then
 retry `make agent-rebuild`; do not delete the workspace or credential volumes.
 
-An existing stopped agent container is recreated, verified and left stopped;
+An existing stopped agent container is recreated, verified and disposed;
 if none exists, creation waits for `agent-start`. No clone, reset, checkout,
 rebase, or Python synchronization runs during a harness rebuild. Workspace,
 `.agent/state.json`, named credential volumes and saved ports are retained.
@@ -375,3 +375,130 @@ and state across rebuild/recreation, and verify CLI versions and non-root
 permissions. They skip when a usable rootless engine is unavailable; real
 account persistence requires this manual validation.
 {% endif %}
+
+## Disk usage and cleanup
+
+Successful pytest temporary data is deleted. Failed-test data from setup, call
+and teardown remains available for diagnosis, with `tmp_path_retention_policy =
+"failed"` and `tmp_path_retention_count = "1"` in `pyproject.toml`. The count is a
+string for compatibility with the master's locked pytest 9.1.x; no automatic `--basetemp` is added. A small
+shared `tests/conftest.py` fixture defers per-test cleanup until the teardown
+report, using public pytest APIs: pytest 9.1's builtin fixture otherwise removes
+some setup/teardown error diagnostics. Pytest's factory still manages numbered
+sessions, locks and historical retention. Session-scoped factory data, including
+the shared default generated project, is removed when the whole suite succeeds.
+
+`make test-disk-report` is a read-only, optional report of the current user's
+pytest temp root, largest retained fixtures and their generated `.venv` sizes.
+It respects `PYTEST_DEBUG_TEMPROOT` for diagnostics; it never deletes that path.
+`.pytest_cache` contains small pytest metadata and is separate from the large
+`/tmp/pytest-of-agent` trees. Failed generations may remain large on purpose.
+Inspect and save required diagnostics before explicitly cleaning them or
+removing the disposable container: failed temporaries do not survive agent-stop.
+
+The expensive generator tests build separate `.venv` environments to exercise
+Cookiecutter, Cruft, agent profiles, Git isolation, builds and documentation.
+These projects are modified by the tests, so sharing them further would risk
+cross-test contamination. Their coverage and isolation are retained. Retention
+removes their successful environments together with the temporary projects;
+there is no second automatic `.venv` deletion routine.
+
+The container is a disposable runtime. `make agent-stop` now performs Compose
+`down`, scoped to this project's manifest, without deleting named volumes.
+`agent-clean` remains a compatibility command for the same runtime removal.
+Both preserve `.agent/workspace`, `.agent/state.json`, commits, profile, saved
+ports, credentials, the uv cache and venv volumes, and custom harness volumes.
+A later start creates a fresh container, reuses saved ports or the existing
+localhost fallback, and applies the normal HEAD/session rules. Agent harness
+updates also retain these data and dispose their verification runtime.
+
+| Command | Scope |
+| --- | --- |
+| `make agent-disk` | Workspace, container writable layer, image, runtime `/tmp`, pytest, uv/npm caches, mounted volumes and read-only Podman totals. |
+| `make agent-stop` | Remove this runtime/network and its writable layer; preserve volumes and Git session. |
+| `make agent-clean-temp` | Explicitly delete only `/tmp/pytest-of-agent` inside a running non-root Podman agent. |
+| `make agent-clean-cache` | Explicitly clean only `/home/agent/.cache/uv` and `/home/agent/.npm` with uv/npm commands. |
+| `make agent-clean` | Same project runtime disposal as `agent-stop`; never credentials. |
+| `make clean` (generated project) | Explicitly remove its listed build/lint/test outputs; preserve data, artifacts and agent session. |
+
+Cleanup prints its scope and sizes first, refuses symlinked cleanup paths, and
+refuses when a live pytest lock is present. Exit running tests before cleanup.
+The cache command preserves the venv, workspace, state, all credentials, and
+custom harness volumes. Neither cache nor temp cleanup removes build products
+from the Git workspace. Existing project `clean` handles `dist/`, `build/`,
+`site/`, `.pytest_cache/`, `.mypy_cache/`, and `.ruff_cache/` when explicitly
+requested; these generated outputs are ignored by Git. The master ignores its
+corresponding outputs too.
+
+Caches are not purged at stop. The dedicated uv cache speeds repeated syncs;
+npm cache, pre-commit, pip and other non-mounted runtime data disappear with
+the writable layer. No persistent `/tmp` volume or tmpfs is added: large
+generations need disk space during the suite, while tmpfs could consume GiB
+of RAM. Retention bounds persistence, not peak space during an individual test.
+
+### Podman agent uses several GB after running tests
+
+Start with read-only diagnostics from the host:
+
+```bash
+make agent-disk
+podman ps -a --size
+podman system df
+podman system df -v
+podman volume ls
+```
+
+Inside `make agent-shell`, inspect actual paths and mounts:
+
+```bash
+du -xhd1 /tmp 2>/dev/null | sort -h
+du -xhd1 /home/agent 2>/dev/null | sort -h
+du -xhd1 /workspace 2>/dev/null | sort -h
+du -sh /home/agent/.cache/uv /home/agent/.npm /opt/venv 2>/dev/null
+make test-disk-report
+```
+
+`du -x` deliberately excludes nested filesystems: measure mounted caches,
+venv and credential homes separately. File reports use allocated bytes and
+don't follow symlinks; independent path totals can share hardlinked files.
+Podman's writable-layer size excludes named volumes and images. Images/layers,
+credential histories, caches and the bound workspace also consume space; do
+not attribute all Podman usage to pytest or sum shared layers naively.
+With no engine/container, `agent-disk` reports what is available rather than
+creating a runtime just to measure it. Podman totals can include other projects;
+all cleanup remains project-scoped.
+
+An older accumulation can survive the new pytest configuration. Review retained
+failures with `make test-disk-report`, then explicitly run `make agent-clean-temp`
+inside the project's running runtime through the host target, or simply exit
+and `make agent-stop` to discard its writable layer. For older unrelated or
+obsolete containers, identify the exact IDs using `podman ps -a --size`, verify
+ownership and recovery needs, then remove only those reviewed IDs explicitly.
+Do not prune volumes or run global `podman system prune`, `podman image prune -a`
+or `podman volume prune`: other projects and credential volumes may share the
+engine. No destructive credential-cleanup target is introduced.
+
+### Host WSL validation
+
+Record `make agent-disk` and `podman system df -v` before and after `make check`
+inside `make agent-shell`. Successful pytest data should be removed; failed
+fixtures intentionally remain. Create `/tmp/template-disposable-test/blob`
+with `dd if=/dev/zero bs=1M count=100`, record a workspace file/commit and place
+non-secret sentinels in each credential directory. Exit the shell and run:
+
+```bash
+make agent-stop
+podman ps -a --size
+podman system df -v
+make agent-start
+make agent-shell
+# Inside: test ! -e /tmp/template-disposable-test/blob
+# Inspect workspace/state and credential sentinels, then exit.
+```
+
+Confirm the old container/writable layer disappeared and volumes survived.
+Reopen installed harnesses (Codex/Claude when included) sequentially and
+confirm existing logins remain.
+Automated host runtime tests perform the 100 MiB stop/start and sentinel checks;
+they skip when rootless Podman is unavailable. Actual account authentication is
+always a manual check. No engine socket is mounted to bypass this boundary.

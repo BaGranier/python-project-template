@@ -481,7 +481,7 @@ def stop_session_runtime() -> None:
         raise ValueError(
             "Podman required on the host to stop/remove runtime before session changes."
         )
-    compose("down")  # Never --volumes: authentication and custom tools survive.
+    remove_runtime()  # Never --volumes: authentication and custom tools survive.
 
 
 def retire_session() -> Path:
@@ -1086,7 +1086,7 @@ def rebuild(*, updates: dict[str, str] | None = None) -> None:
         run(["podman", "tag", candidate, IMAGE])
         if container is not None:
             # No down --volumes, no prepare/start/uv sync, no Git operation.
-            # Recreate only the agent service and leave it stopped after verification.
+            # Recreate only the agent service, verify it, then dispose the runtime.
             compose("up", "-d", "--no-build", "--force-recreate", "agent")
             try:
                 for name, agent in AGENTS.items():
@@ -1104,7 +1104,7 @@ def rebuild(*, updates: dict[str, str] | None = None) -> None:
                     if actual != desired[VERSION_KEYS[name]]:
                         raise ValueError(f"Activated {name} version differs from its pin.")
             finally:
-                compose("stop", "agent")
+                remove_runtime()
         for name, agent in AGENTS.items():
             key = VERSION_KEYS[name]
             print(f"{agent.name}: {pins[key]} → {desired[key]}")
@@ -1124,7 +1124,7 @@ def rebuild(*, updates: dict[str, str] | None = None) -> None:
                     run(["podman", "untag", IMAGE])
                 if container is not None and previous:
                     compose("up", "-d", "--no-build", "--force-recreate", "agent")
-                    compose("stop", "agent")
+                    remove_runtime()
         raise
     finally:
         # Remove only our temporary tag; retain previous images/layers for recovery.
@@ -1230,6 +1230,66 @@ def apply() -> None:
     print("Commits applied locally. Stop/archive this session before creating another. No push.")
 
 
+def remove_runtime() -> None:
+    """Dispose only this Compose stack, retaining all named volumes and Git state."""
+    compose("down")
+    print("Disposable runtime removed. Workspace, state and all persistent volumes preserved.")
+
+
+def storage_command(command: str) -> None:
+    # Send trusted primary-checkout code, never a script from the mutable agent clone.
+    source = (ROOT / "scripts/disk_usage.py").read_text()
+    compose("exec", "-T", "agent", "python", "-c", source, command)
+
+
+def disk() -> None:
+    print("Agent disk usage (read-only; allocated file sizes exclude nested mounts)", flush=True)
+    run([sys.executable, str(ROOT / "scripts/disk_usage.py"), "path", str(WORKSPACE)])
+    if not shutil.which("podman"):
+        print("Podman unavailable: container, image and volume sizes require the host engine.")
+        if Path("/run/.containerenv").is_file() and os.getuid() == 1000:
+            print("Current sandbox directories (host engine accounting unavailable):", flush=True)
+            run([sys.executable, str(ROOT / "scripts/disk_usage.py"), "runtime-report"])
+        return
+    container = agent_container()
+    if container is None:
+        print("No agent container. Writable layer and runtime /tmp: absent.")
+    else:
+        identifier = container["Id"]
+        print(
+            "Container writable layer and root filesystem (Podman SizeRw/SizeRootFs):", flush=True
+        )
+        run(
+            [
+                "podman",
+                "container",
+                "inspect",
+                "--size",
+                "--format",
+                "{{ '{{' }}.SizeRw{{ '}}' }} / {{ '{{' }}.SizeRootFs{{ '}}' }} bytes",
+                identifier,
+            ]
+        )
+        if container["State"]["Running"]:
+            storage_command("runtime-report")
+            print("Mounted persistent volumes (allocated bytes, inside runtime):", flush=True)
+            for mount in container.get("Mounts", []):
+                if mount["Type"] == "volume":
+                    print(str(mount.get("Name", "volume")), flush=True)
+                    compose("exec", "-T", "agent", "du", "-sh", mount["Destination"])
+        else:
+            print("Stopped runtime: internal directory sizes unavailable; start to inspect them.")
+    print("Configured image size:", flush=True)
+    present = subprocess.run(["podman", "image", "exists", IMAGE], check=False)
+    if present.returncode == 0:
+        run(["podman", "image", "inspect", "--format", "{{ '{{' }}.Size{{ '}}' }} bytes", IMAGE])
+    print(
+        "Persistent volume sizes and Podman totals (read-only, may include other projects):",
+        flush=True,
+    )
+    run(["podman", "system", "df", "--verbose"])
+
+
 def status() -> None:
     result = state()
     report_session(result)
@@ -1296,6 +1356,9 @@ def main() -> None:
             "test",
             "apply",
             "clean",
+            "disk",
+            "clean-temp",
+            "clean-cache",
         ],
     )
     parser.add_argument("--provider", choices=["codex", "claude"])
@@ -1315,6 +1378,9 @@ def main() -> None:
                         "Custom authentication is harness-specific; use make agent-shell."
                     )
                 argv = custom_command()
+        if command == "disk":
+            disk()
+            return
         if command == "versions":
             versions()
             return
@@ -1340,11 +1406,16 @@ def main() -> None:
                 state()
                 args = ["bash"] if command == "shell" else ["make", "check"]
                 compose("exec", *([] if command == "shell" else ["-T"]), "agent", *args)
+            elif command in {"clean-temp", "clean-cache"}:
+                state()
+                storage_command(command)
             elif command in {"stop", "clean", "logs"}:
-                state(allow_profile_mismatch=command in {"stop", "clean"})
-                compose({"stop": "stop", "clean": "down", "logs": "logs"}[command])
-                if command == "clean":
-                    print("Clone and persistent volumes preserved. No credentials deleted.")
+                if STATE.exists():
+                    state(allow_profile_mismatch=command in {"stop", "clean"})
+                if command == "logs":
+                    compose("logs")
+                else:
+                    remove_runtime()
             elif command == "diff":
                 diff()
             elif command == "apply":

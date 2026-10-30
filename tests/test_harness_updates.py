@@ -117,7 +117,7 @@ def test_rebuild_preserves_git_and_state(
     assert after == before
     assert helper.STATE.read_bytes() == state
     assert composition[0] == ("up", "-d", "--no-build", "--force-recreate", "agent")
-    assert composition[-1] == ("stop", "agent")
+    assert composition[-1] == ("down",)
     assert all("--volumes" not in args for args in composition)
     assert any(args[:2] == ["podman", "build"] for args in engine)
 
@@ -152,7 +152,7 @@ def test_failed_update_restores_pins_and_image(
     tags = [args for args in engine if args[1] == "tag"]
     if failure == "fail_activation":
         assert tags[-1] == ["podman", "tag", "sha256:previous-image", helper.IMAGE]
-        assert composition[-1] == ("stop", "agent")
+        assert composition[-1] == ("down",)
     else:
         assert not tags and not composition
 
