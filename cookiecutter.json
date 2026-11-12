@@ -29,5 +29,12 @@
     "both",
     "custom",
     "none"
+  ],
+  "project_profile": [
+    "python",
+    "node",
+    "mixed",
+    "generic",
+    "auto"
   ]
 }

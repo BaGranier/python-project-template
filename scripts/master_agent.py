@@ -14,6 +14,7 @@ PROFILES = ("codex", "claude", "both", "custom")
 
 def render(name: str, profile: str) -> str:
     context = {
+        "project_profile": "python",
         "project_slug": "python-project-template",
         "coding_agent": profile,
         "python_version": (ROOT / ".python-version").read_text().strip(),

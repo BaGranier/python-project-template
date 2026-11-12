@@ -30,17 +30,23 @@ ENV SHELL=/usr/bin/zsh
 {% endif %}
 USER agent
 CMD ["sleep", "infinity"]
-{% if cookiecutter.coding_agent != 'none' %}
+{% if cookiecutter.coding_agent != 'none' or cookiecutter._adoption | default('no') == 'yes' %}
 
+{% if cookiecutter.coding_agent != 'none' or cookiecutter.project_profile | default('python') in ['node', 'mixed'] %}
 FROM node:22.22.0-bookworm-slim AS node
+{% endif %}
 FROM base AS agent-base
+{% if cookiecutter.coding_agent != 'none' or cookiecutter.project_profile | default('python') in ['node', 'mixed'] %}
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+{% endif %}
 RUN mkdir -p /opt/agent-tools/bin /home/agent/.local/bin /home/agent/.config \
     && chown -R agent:agent /opt/agent-tools /home/agent/.local /home/agent/.config
 ENV PATH=/opt/agent-tools/bin:/home/agent/.local/bin:$PATH
+{% if cookiecutter.coding_agent != 'none' or cookiecutter.project_profile | default('python') in ['node', 'mixed'] %}
 RUN node --version && npm --version
+{% endif %}
 
 FROM agent-base AS agent
 {% if cookiecutter.coding_agent in ['codex', 'both'] %}

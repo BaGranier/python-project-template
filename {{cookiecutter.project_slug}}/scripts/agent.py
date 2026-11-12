@@ -118,7 +118,7 @@ def default_provider() -> str:
 
 def selected_agent(provider: str | None = None) -> CodingAgent | None:
     choice = provider or default_provider()
-    if choice == "custom" and PROFILE == "custom":
+    if choice == PROFILE and PROFILE in {"custom", "none"}:
         return None
     if choice not in AGENTS:
         raise ValueError(f"Harness {choice!r} is not installed by profile {PROFILE!r}.")
@@ -1167,12 +1167,15 @@ def start() -> None:
     if not uid.isdecimal() or int(uid) == 0:
         compose("stop")
         raise ValueError("Sandbox must execute as a non-root user.")
-    compose("exec", "-T", "agent", "uv", "sync", "--locked")
-    for agent in AGENTS.values():
+    # Adopted repositories keep their existing dependency manager and manifests.
+    if not (ROOT / ".template/project.json").exists():
+{% if cookiecutter.project_profile | default("python") == "python" %}        compose("exec", "-T", "agent", "uv", "sync", "--locked")
+{% else %}        pass
+{% endif %}    for agent in AGENTS.values():
         compose("exec", "-T", "agent", agent.cli, "--version")
-    compose("exec", "-T", "agent", "node", "--version")
+{% if cookiecutter.coding_agent != 'none' or cookiecutter.project_profile | default('python') in ['node', 'mixed'] %}    compose("exec", "-T", "agent", "node", "--version")
     compose("exec", "-T", "agent", "npm", "--version")
-
+{% endif %}
 
 def diff() -> None:
     result = state()

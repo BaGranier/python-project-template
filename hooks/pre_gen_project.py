@@ -29,6 +29,7 @@ for key, choices in {
     "ci_provider": {"github", "gitlab", "none"},
     "enable_notebooks": {"yes", "no"},
     "enable_docs": {"yes", "no"},
+    "project_profile": {"python", "node", "mixed", "generic", "auto"},
     "coding_agent": {"codex", "claude", "both", "custom", "none"},
 }.items():
     if context[key] not in choices:

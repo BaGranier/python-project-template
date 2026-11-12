@@ -283,3 +283,19 @@ workspace Git, état, credentials, cache uv et venv dans leurs volumes.
 Aucun prune global, volume `/tmp` persistant ou tmpfs n’est ajouté.
 Voir [le guide disque](docs/agent.md#disk-usage-and-cleanup) pour les mesures,
 la récupération ponctuelle d’anciennes accumulations et la validation WSL.
+
+### Existing repositories and project profiles
+
+To add the sandbox infrastructure to an existing Git repository without replacing
+its history or application files:
+
+```bash
+make adopt-dry-run REPO=~/projects/existing-repo
+make adopt REPO=~/projects/existing-repo
+```
+
+Choose `PROFILE=auto|python|node|mixed|generic` independently of
+`AGENT=codex|claude|both|custom|none`. New Cookiecutter projects also expose
+`project_profile`. Python/uv can run internal template tooling without making the
+application a Python project. See [the adoption workflow](docs/adoption.md) for
+merge rules, command configuration, review and limitations.

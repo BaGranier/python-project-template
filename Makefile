@@ -110,3 +110,12 @@ agent-update-claude: ## Update Claude Code
 	uv run python scripts/agent.py update --provider claude
 endif
 endif
+
+PROFILE ?= auto
+AGENT ?= both
+export REPO PROFILE AGENT
+.PHONY: adopt adopt-dry-run
+adopt: ## Adopt common infrastructure into an existing clean Git repository
+	uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT"
+adopt-dry-run: ## Audit adoption and show its diff without writing files
+	uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT" --dry-run
