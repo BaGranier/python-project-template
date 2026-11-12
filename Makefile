@@ -10,15 +10,25 @@ shell: setup ## Open a child Bash/Zsh with the template environment
 .PHONY: test-disk-report
 test-disk-report: ## Report retained pytest data and largest fixtures (read-only)
 	uv run python scripts/disk_usage.py pytest-report
-test: ## Run generation and Git isolation tests
-	uv run pytest
+test: ## Run fast logic, rendering and lightweight Git tests
+	uv run pytest -m "not integration and not runtime"
+.PHONY: test-integration test-runtime test-profile check-full
+test-integration: ## Validate real rendered projects, Cruft, builds and docs
+	uv run pytest -m integration
+test-runtime: ## Run real container tests (explicit skips without an engine)
+	uv run pytest -m runtime
+test-profile: ## Profile the full suite; not part of routine checks
+	uv run pytest --durations=30 --durations-min=0.5
 lint: ## Lint template maintenance code
 	uv run ruff check tests scripts
 format-check: ## Check maintenance code formatting
 	uv run ruff format --check tests scripts
 typecheck: ## Type check the generator tests
 	uv run mypy
-check: lint format-check typecheck test ## Validate the template
+check: lint format-check typecheck test ## Fast template development checks
+check-full: check ## Validate fast, integration and available container runtime suites
+	$(MAKE) test-integration
+	$(MAKE) test-runtime
 generate-default: ## Generate a disposable validation example in generated/
 	uv run cookiecutter . --no-input --output-dir generated
 	@printf '%s\n' 'Generated project created for template validation only.' '' 'Path:' 'generated/my-python-project' '' 'This directory is disposable and ignored by Git.' '' 'For a real project, run Cruft from the parent directory where' 'you want the new repository to live.'
@@ -44,7 +54,7 @@ agent-logs: ## Show this sandbox's logs
 	uv run python scripts/agent.py logs
 agent-diff: ## Review isolated commits and working changes
 	uv run python scripts/agent.py diff
-agent-test: ## Run make check inside the sandbox (host runtime tests may skip)
+agent-test: ## Run fast template checks inside the sandbox
 	uv run python scripts/agent.py test
 agent-apply: ## Cherry-pick reviewed agent commits locally (stop first)
 	uv run python scripts/agent.py apply

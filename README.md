@@ -59,7 +59,7 @@ Consultez le [guide de développement dans la sandbox](docs/agent.md) pour la
 validation hôte, les logins séparés, le test fonctionnel commit/diff/test/apply,
 les volumes persistants et la transition depuis Docker. Les tests runtime
 Podman restent volontairement **sur l’hôte** : aucun socket moteur n’est monté
-dans l’agent pour les exécuter. `make check` affiche leurs skips dans la sandbox.
+dans l’agent pour les exécuter. `make check` les exclut ; `make check-full` affiche leurs skips dans la sandbox.
 Docker n’est pas requis pour ce workflow. Les fichiers bootstrap locaux sont
 préservés jusqu’à validation manuelle ; ne les supprimez pas prématurément.
 Les projets générés conservent leur choix de runtime dev Docker.
@@ -299,3 +299,16 @@ Choose `PROFILE=auto|python|node|mixed|generic` independently of
 `project_profile`. Python/uv can run internal template tooling without making the
 application a Python project. See [the adoption workflow](docs/adoption.md) for
 merge rules, command configuration, review and limitations.
+
+### Niveaux de validation du template
+
+- `make test` : logique, rendu léger, configuration et Git sans installation applicative.
+- `make check` : Ruff, format, mypy et suite rapide pour la boucle courante.
+- `make test-integration` : vrais projets synchronisés, builds, docs et Cruft.
+- `make test-runtime` : vrais moteurs et containers ; skips explicites si indisponibles.
+- `make check-full` : validation complète avant finalisation d'un changement important.
+- `make test-profile` : suite complète avec les 30 durées les plus longues.
+
+Les targets du maître concernent le générateur ; les commandes de validation des
+applications générées conservent leur comportement. Voir [le guide de tests](docs/testing.md)
+et [les mesures avant/après](docs/test-performance.md).

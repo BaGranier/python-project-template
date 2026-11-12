@@ -8,7 +8,12 @@ Before modifying, inspect `git status --short`, `git branch --show-current`,
 `git log -5 --oneline` and the relevant files. Preserve unrelated work.
 
 Use uv exclusively. Sources of truth: pyproject.toml, uv.lock, .python-version.
-Run targeted tests then `make check`. Cover enabled and disabled options.
+During iterative development, run targeted tests then `make check` (fast suite).
+Before finalizing template/rendering changes, run `make test-integration`.
+Before finalizing container/agent changes, run `make test-runtime` on a host
+with the required engine. For full validation, run `make check-full`.
+Use validation proportionate to the change: documentation or a small helper
+change does not require real container builds. Cover enabled and disabled options.
 Valid template source alone is insufficient: generate a real project and run
 `make setup`, `make check`, `make build`, and `make docs-build` when applicable.
 Never claim unavailable runtime/container checks passed. No push without request.

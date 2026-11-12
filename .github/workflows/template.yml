@@ -1,9 +1,17 @@
 name: Template validation
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runtime:
+        description: Run available container engine tests on the host runner
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
-  template:
+  fast:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -12,3 +20,22 @@ jobs:
           version: "0.13.5"
       - run: uv sync --locked
       - run: make check
+  integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+      - run: uv sync --locked
+      - run: make test-integration
+  runtime:
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+      - run: uv sync --locked
+      - run: make test-runtime

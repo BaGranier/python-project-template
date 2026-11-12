@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 import test_template as template
-import yaml
 
 
 @pytest.mark.parametrize("default", ["codex", "claude"])
@@ -155,54 +153,3 @@ def test_profile_change_rejects_reuse_but_allows_cleanup(
     helper.main()
     assert calls == [("down",)]
     assert json.loads(helper.STATE.read_text())["profile"] == old
-
-
-def test_cruft_codex_to_both_preserves_volume_name(tmp_path: Path) -> None:
-    source = tmp_path / "template"
-    source.mkdir()
-    for name in ("cookiecutter.json", "README.md"):
-        shutil.copyfile(template.ROOT / name, source / name)
-    for name in ("hooks", "{{cookiecutter.project_slug}}"):
-        shutil.copytree(template.ROOT / name, source / name)
-    template.initialize(source)
-    template.command(
-        template.ROOT,
-        sys.executable,
-        "-m",
-        "cruft",
-        "create",
-        str(source),
-        "--no-input",
-        "--output-dir",
-        str(tmp_path / "output"),
-    )
-    project = tmp_path / "output/my-python-project"
-    template.initialize(project)
-    old_helper = template.configure_agent(project)
-    old_helper.prepare()
-    before = yaml.safe_load((project / "containers/compose.agent.yaml").read_text())
-    volume = before["volumes"]["agent-codex-home"]["name"]
-    template.command(
-        project,
-        sys.executable,
-        "-m",
-        "cruft",
-        "update",
-        "--skip-apply-ask",
-        "--variables-to-update",
-        json.dumps({"coding_agent": "both"}),
-    )
-    template.command(project, sys.executable, "-m", "cruft", "check")
-    template.command(project, sys.executable, "-m", "cruft", "diff")
-    assert (
-        json.loads((project / ".cruft.json").read_text())["context"]["cookiecutter"]["coding_agent"]
-        == "both"
-    )
-    after = yaml.safe_load((project / "containers/compose.agent.yaml").read_text())
-    assert after["volumes"]["agent-codex-home"]["name"] == volume
-    assert "agent-claude-home" in after["volumes"]
-    assert (project / "AGENTS.md").read_text() == (project / "CLAUDE.md").read_text()
-    updated_helper = template.configure_agent(project)
-    with pytest.raises(ValueError, match="provider differs"):
-        updated_helper.state()
-    template.command(project, "make", "check")

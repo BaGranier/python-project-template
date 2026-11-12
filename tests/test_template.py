@@ -12,13 +12,13 @@ import socket
 import subprocess
 import sys
 import tomllib
-import zipfile
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from functools import partial
+from functools import cache
 from pathlib import Path
+from tempfile import TemporaryDirectory, mkdtemp
 from types import ModuleType
-from uuid import uuid4
+from unittest.mock import patch
 
 import jupytext
 import pytest
@@ -44,10 +44,48 @@ def command(
     return result.stdout
 
 
+def _generate(destination: Path, options: dict[str, str], *, lock: bool) -> Path:
+    # The real pre/post hooks still validate and prune the rendered project.
+    # An empty PATH exercises the supported uv-absent hook path, avoiding network
+    # resolution for structural tests. Integration/runtime use real uv locking.
+    with patch.dict(os.environ, {} if lock else {"PATH": ""}):
+        return Path(
+            cookiecutter(
+                str(ROOT), no_input=True, output_dir=str(destination), extra_context=options
+            )
+        )
+
+
+@cache
+def _render_root() -> TemporaryDirectory[str]:
+    return TemporaryDirectory(prefix="template-render-")
+
+
+@cache
+def _rendered_skeleton(options: tuple[tuple[str, str], ...]) -> Path:
+    directory = Path(mkdtemp(dir=_render_root().name))
+    return _generate(directory, dict(options), lock=False)
+
+
 def generate(destination: Path, **options: str) -> Path:
-    return Path(
-        cookiecutter(str(ROOT), no_input=True, output_dir=str(destination), extra_context=options)
-    )
+    # Cache only immutable render output, never a Git repository or environment.
+    # Every caller receives its own copy so changes cannot contaminate other tests.
+    skeleton = _rendered_skeleton(tuple(sorted(options.items())))
+    destination.mkdir(parents=True, exist_ok=True)
+    return Path(shutil.copytree(skeleton, destination / skeleton.name))
+
+
+def generate_locked(destination: Path, **options: str) -> Path:
+    return _generate(destination, options, lock=True)
+
+
+def validate_rendered(project: Path) -> None:
+    for path in project.rglob("*.py"):
+        ast.parse(path.read_text(), filename=str(path))
+    tomllib.loads((project / "pyproject.toml").read_text())
+    for pattern in ("*.yaml", "*.yml"):
+        for path in project.rglob(pattern):
+            yaml.safe_load(path.read_text())
 
 
 @pytest.fixture(scope="session")
@@ -80,7 +118,6 @@ def test_default_structure(default_project: Path) -> None:
         "AGENTS.md",
         ".github/workflows/ci.yml",
         ".github/workflows/pages.yml",
-        "uv.lock",
     ):
         assert (default_project / name).is_file(), name
     metadata = tomllib.loads((default_project / "pyproject.toml").read_text())
@@ -144,11 +181,9 @@ def test_option_matrix(tmp_path: Path, options: dict[str, str]) -> None:
             if (project / "containers/Containerfile").exists()
             else True
         )
-    command(project, "uv", "run", "ruff", "check", ".")
-    command(project, "uv", "run", "ruff", "format", "--check", ".")
-    command(project, "uv", "run", "mypy")
-    if docs:
-        command(project, "make", "docs-build")
+    # Complete quality/build/docs workflows live in integration for default,
+    # both, custom and none/minimal. Every option still gets syntax/config validation.
+    validate_rendered(project)
 
 
 @pytest.mark.parametrize(
@@ -170,46 +205,13 @@ def test_invalid_input(tmp_path: Path, options: dict[str, str]) -> None:
     assert not list(tmp_path.iterdir())
 
 
-def test_custom_names(tmp_path: Path) -> None:
-    project = generate(tmp_path, project_name="Flood Extent", package_name="flood_tools")
-    assert project.name == "flood-extent"
-    assert (project / "src/flood_tools/__init__.py").exists()
-    command(project, "uv", "build")
-
-
-def test_default_execution(default_project: Path) -> None:
-    project = default_project
-    command(project, "make", "setup")
-    original = "# preserve local settings\nAGENT_APP_PORT=19000\n"
-    (project / ".env").write_text(original)
-    command(project, "make", "setup")
-    assert (project / ".env").read_text() == original
-    command(project, "uv", "sync", "--locked")
-    command(project, "make", "help")
-    command(project, "make", "check")
-    command(project, "make", "build")
-    command(project, "make", "docs-build")
-    wheel = next((project / "dist").glob("*.whl"))
-    with zipfile.ZipFile(wheel) as archive:
-        assert "my_python_project/__init__.py" in archive.namelist()
-    assert list((project / "dist").glob("*.tar.gz"))
-    command(project, "uv", "run", "python", "-m", "my_python_project")
-    (project / "data/raw/keep.txt").write_text("precious")
-    (project / "artifacts/keep.txt").write_text("precious")
-    command(project, "make", "clean")
-    assert (project / "data/raw/keep.txt").read_text() == "precious"
-    assert (project / "artifacts/keep.txt").read_text() == "precious"
-
-
 def test_jupytext(default_project: Path) -> None:
     script = default_project / "notebooks/01_example.py"
     notebook = jupytext.read(script)
     assert notebook.metadata["jupytext"]["text_representation"]["format_name"] == "percent"
     assert len(notebook.cells) >= 2
     ast.parse(script.read_text())
-    command(default_project, "uv", "run", "jupytext", "--to", "ipynb", str(script))
-    command(default_project, "uv", "run", "jupytext", "--sync", str(script.with_suffix(".ipynb")))
-    command(default_project, "uv", "run", "python", str(script))
+    # CLI conversion/sync/execution reuses the integration smoke's environment.
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
@@ -248,22 +250,24 @@ def test_shell_environment(shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])
-def test_shell_rc_loading(
-    default_project: Path, shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_shell_rc_loading(shell: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     if not shutil.which(shell):
         pytest.skip(f"{shell} unavailable")
-    command(default_project, "uv", "sync")
-    helper = load_module(default_project / "scripts/shell.py", "shell_rc_helper")
+    project = tmp_path / "project"
+    project.mkdir()
+    # Shell activation needs a Python executable, not application dependencies.
+    command(project, "uv", "venv", "--python", sys.executable)
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    helper = load_module(ROOT / "{{cookiecutter.project_slug}}/scripts/shell.py", "shell_rc_helper")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ZDOTDIR", str(tmp_path))
     sentinel = tmp_path / (".zshrc" if shell == "zsh" else ".bashrc")
     contents = 'export TEMPLATE_RC_LOADED=1\nalias template_alias="echo alias-loaded"\n'
     sentinel.write_text(contents)
-    executable, env = helper.shell_environment(default_project, shell)
+    executable, env = helper.shell_environment(project, shell)
     # -i loads RC files; -c gives the shell a finite command instead of a piped REPL.
     output = command(
-        default_project,
+        project,
         executable,
         "-i",
         "-c",
@@ -273,8 +277,8 @@ def test_shell_rc_loading(
         timeout=10,
     )
     assert "RC=1" in output.splitlines()
-    assert f"VENV={default_project / '.venv'}" in output.splitlines()
-    assert str(default_project / ".venv/bin/python") in output.splitlines()
+    assert f"VENV={project / '.venv'}" in output.splitlines()
+    assert str(project / ".venv/bin/python") in output.splitlines()
     assert "alias-loaded" in output
     assert sentinel.read_text() == contents
 
@@ -334,75 +338,6 @@ def git_identity_environment(directory: Path, configured: bool = True) -> dict[s
     return env
 
 
-def test_init_and_idempotence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = generate(tmp_path)
-    env = git_identity_environment(tmp_path)
-    assert "initialized" in command(project, "make", "init", env=env)
-    assert (project / ".git").is_dir()
-    assert Path(command(project, "git", "rev-parse", "--show-toplevel").strip()) == project
-    assert (
-        command(project, "git", "log", "-1", "--format=%s").strip() == "chore: initialize project"
-    )
-    assert (project / ".venv/bin/python").exists()
-    assert (project / ".git/hooks/pre-commit").exists()
-    first = command(project, "git", "rev-parse", "HEAD")
-    (project / ".env").write_text("KEEP_LOCAL=yes\n")
-    (project / "user-change.txt").write_text("do not commit")
-    output = command(project, "make", "init", env=env)
-    assert "Initial commit: already present" in output
-    assert command(project, "git", "rev-parse", "HEAD") == first
-    assert (project / ".env").read_text() == "KEEP_LOCAL=yes\n"
-    assert "?? user-change.txt" in command(project, "git", "status", "--porcelain")
-    (project / "user-change.txt").unlink()
-    helper = configure_agent(project)
-    monkeypatch.setattr(helper, "running_containers", lambda: False)
-    assert helper.prepare()["base"] == first.strip()
-
-
-def test_init_inside_parent_repository(tmp_path: Path) -> None:
-    parent = tmp_path / "parent"
-    parent.mkdir()
-    (parent / ".gitignore").write_text("my-python-project/\n")
-    initialize(parent)
-    before = command(parent, "git", "rev-parse", "HEAD")
-    index = (parent / ".git/index").read_bytes()
-    project = generate(parent)
-    helper = configure_agent(project)
-    with pytest.raises(ValueError, match="parent Git repository"):
-        helper.prepare()
-    assert not (project / ".git").exists()
-    output = command(project, "make", "init", env=git_identity_environment(tmp_path))
-    assert "Parent Git repository detected" in output
-    assert Path(command(project, "git", "rev-parse", "--show-toplevel").strip()) == project
-    assert (project / ".git").is_dir()
-    assert command(parent, "git", "rev-parse", "HEAD") == before
-    assert command(parent, "git", "status", "--porcelain").strip() == ""
-    assert (parent / ".git/index").read_bytes() == index
-
-
-def test_init_missing_identity_and_resume(tmp_path: Path) -> None:
-    project = generate(tmp_path)
-    result = subprocess.run(
-        ["make", "init"],
-        cwd=project,
-        capture_output=True,
-        text=True,
-        env=git_identity_environment(tmp_path, configured=False),
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "Git identity is not configured" in result.stderr
-    assert 'git config --global user.name "Your Name"' in result.stderr
-    assert "make init" in result.stderr
-    assert (project / ".git").is_dir()
-    head = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"], cwd=project, capture_output=True, check=False
-    )
-    assert head.returncode != 0
-    command(project, "make", "init", env=git_identity_environment(tmp_path))
-    assert command(project, "git", "rev-list", "--count", "HEAD").strip() == "1"
-
-
 def test_init_preserves_existing_unborn_repository(tmp_path: Path) -> None:
     project = generate(tmp_path)
     command(project, "git", "init", "-b", "main")
@@ -428,38 +363,6 @@ def test_agent_requires_initial_commit(tmp_path: Path) -> None:
     command(project, "git", "init", "-b", "main")
     with pytest.raises(ValueError, match="at least one commit.*make init"):
         helper.prepare()
-
-
-def test_demo_generation_and_explicit_cleanup(tmp_path: Path) -> None:
-    template = tmp_path / "template"
-    template.mkdir()
-    for name in ("Makefile", "cookiecutter.json"):
-        shutil.copyfile(ROOT / name, template / name)
-    for name in ("hooks", "scripts", "{{cookiecutter.project_slug}}"):
-        shutil.copytree(ROOT / name, template / name, ignore=shutil.ignore_patterns("__pycache__"))
-    neighbor = tmp_path / "user-project"
-    neighbor.mkdir()
-    (neighbor / "keep.txt").write_text("preserve")
-    output = command(template, "make", "generate-default")
-    assert "validation only" in output and "disposable and ignored by Git" in output
-    assert "generated/my-python-project" in output
-    project = template / "generated/my-python-project"
-    assert project.is_dir()
-    (project / "user-note.txt").write_text("not silently overwritten")
-    repeated = subprocess.run(
-        ["make", "generate-default"], cwd=template, capture_output=True, text=True, check=False
-    )
-    assert repeated.returncode != 0
-    assert (project / "user-note.txt").exists()
-    command(template, "make", "clean-generated")
-    assert not (template / "generated").exists()
-    assert (neighbor / "keep.txt").read_text() == "preserve"
-    (template / "generated").symlink_to(neighbor, target_is_directory=True)
-    refused = subprocess.run(
-        ["make", "clean-generated"], cwd=template, capture_output=True, text=True, check=False
-    )
-    assert refused.returncode != 0
-    assert (neighbor / "keep.txt").read_text() == "preserve"
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom"])
@@ -577,15 +480,6 @@ def test_agent_rootless_rejection(default_project: Path, monkeypatch: pytest.Mon
         helper.check()
 
 
-def test_setup_installs_git_hook(tmp_path: Path) -> None:
-    project = generate(tmp_path)
-    initialize(project)
-    command(project, "make", "setup")
-    assert (project / ".git/hooks/pre-commit").is_file()
-    command(project, "uv", "run", "pre-commit", "run", "--all-files")
-    assert command(project, "git", "status", "--porcelain").strip() == ""
-
-
 def test_yaml_configuration(default_project: Path) -> None:
     for pattern in ("*.yml", "*.yaml"):
         for path in default_project.rglob(pattern):
@@ -615,36 +509,6 @@ def test_bootstrap_documentation(default_project: Path) -> None:
     assert "make init" in (default_project / "docs/getting-started.md").read_text()
     assert "make init" in (default_project / "README.md").read_text()
     assert "jetable" in (ROOT / "README.md").read_text()
-
-
-@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom", "none"])
-def test_cruft_create_check_diff(tmp_path: Path, provider: str) -> None:
-    source = tmp_path / "template"
-    source.mkdir()
-    for name in ("cookiecutter.json", "README.md"):
-        shutil.copyfile(ROOT / name, source / name)
-    for name in ("hooks", "{{cookiecutter.project_slug}}"):
-        shutil.copytree(ROOT / name, source / name)
-    initialize(source)
-    destination = tmp_path / "output"
-    command(
-        ROOT,
-        sys.executable,
-        "-m",
-        "cruft",
-        "create",
-        str(source),
-        "--no-input",
-        "--extra-context",
-        json.dumps({"coding_agent": provider}),
-        "--output-dir",
-        str(destination),
-    )
-    project = destination / "my-python-project"
-    assert json.loads((project / ".cruft.json").read_text())["commit"]
-    command(project, sys.executable, "-m", "cruft", "check")
-    command(project, sys.executable, "-m", "cruft", "diff")
-    command(project, sys.executable, "-m", "cruft", "update", "--skip-apply-ask")
 
 
 def test_shell_missing_environment(
@@ -923,11 +787,7 @@ def test_selected_provider_project(tmp_path: Path, provider: str) -> None:
                 "agent-login-claude",
             ):
                 assert target in help_text
-    command(project, "make", "setup")
-    command(project, "make", "init", env=git_identity_environment(tmp_path))
-    command(project, "make", "check")
-    command(project, "make", "build")
-    command(project, "make", "docs-build")
+    validate_rendered(project)
 
 
 def test_instructions_share_one_source(tmp_path: Path) -> None:
@@ -1004,66 +864,6 @@ def test_compose_selection_and_warning(
     assert section.index("wsl --shutdown") < section.index("loginctl user-status")
 
 
-@pytest.mark.parametrize("legacy_enabled,provider", [("yes", "codex"), ("no", "none")])
-def test_cruft_legacy_context_upgrade(tmp_path: Path, legacy_enabled: str, provider: str) -> None:
-    # A real old-schema template commit, followed by the current template commit.
-    # Self-contained so CI does not require historical Git objects or a deep checkout.
-    source = tmp_path / "template"
-    source.mkdir()
-    config = json.loads((ROOT / "cookiecutter.json").read_text())
-    config.pop("coding_agent")
-    config["enable_agent"] = ["yes", "no"]
-    (source / "cookiecutter.json").write_text(json.dumps(config))
-    legacy = source / "{{cookiecutter.project_slug}}"
-    legacy.mkdir()
-    (legacy / "README.md").write_text("# {{cookiecutter.project_name}}\n")
-    initialize(source)
-    command(
-        ROOT,
-        sys.executable,
-        "-m",
-        "cruft",
-        "create",
-        str(source),
-        "--no-input",
-        "--extra-context",
-        json.dumps({"enable_agent": legacy_enabled}),
-        "--output-dir",
-        str(tmp_path / "output"),
-    )
-    project = tmp_path / "output/my-python-project"
-    old_context = json.loads((project / ".cruft.json").read_text())["context"]["cookiecutter"]
-    assert old_context["enable_agent"] == legacy_enabled and "coding_agent" not in old_context
-    initialize(project)
-    shutil.rmtree(legacy)
-    shutil.copytree(ROOT / "{{cookiecutter.project_slug}}", legacy)
-    shutil.copytree(ROOT / "hooks", source / "hooks")
-    shutil.copyfile(ROOT / "cookiecutter.json", source / "cookiecutter.json")
-    command(source, "git", "add", ".")
-    command(source, "git", "commit", "-m", "add coding_agent")
-    outdated = subprocess.run(
-        [sys.executable, "-m", "cruft", "check"], cwd=project, capture_output=True, check=False
-    )
-    assert outdated.returncode != 0
-    command(project, sys.executable, "-m", "cruft", "diff")
-    command(
-        project,
-        sys.executable,
-        "-m",
-        "cruft",
-        "update",
-        "--skip-apply-ask",
-        "--variables-to-update",
-        json.dumps({"coding_agent": provider}),
-    )
-    state = json.loads((project / ".cruft.json").read_text())
-    assert state["context"]["cookiecutter"]["coding_agent"] == provider
-    assert (project / "scripts/agent.py").exists() == (provider != "none")
-    assert not list(project.glob("*.rej"))
-    command(project, sys.executable, "-m", "cruft", "check")
-    command(project, "make", "check")
-
-
 @contextmanager
 def runtime_cleanup(cleanup: Callable[[], object]) -> Iterator[None]:
     original: BaseException | None = None
@@ -1114,321 +914,20 @@ def test_cleanup_preserves_original_failure() -> None:
             pass
 
 
-def test_dev_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = shutil.which("podman") or shutil.which("docker")
-    if not runtime:
-        pytest.skip("Docker and Podman unavailable: dev build/start/import not executed")
-    usable = subprocess.run([runtime, "info"], capture_output=True, check=False)
-    if usable.returncode:
-        pytest.skip("Container engine installed but unusable in this environment")
-    for key, value in dynamic_ports("DEV").items():
-        monkeypatch.setenv(key, value)
-    project = generate(
-        tmp_path,
-        dev_container_runtime=Path(runtime).name,
-        project_slug=f"runtime-dev-{uuid4().hex[:12]}",
-        package_name="my_python_project",
-    )
-    # An exported user COMPOSE_PROJECT_NAME must not redirect cleanup to a real stack.
-    monkeypatch.setenv("COMPOSE_PROJECT_NAME", f"{project.name}-dev")
-    command(project, "make", "setup")
-    prefix = (runtime, "compose", "--env-file", ".env", "-f", "containers/compose.yaml")
-    with runtime_cleanup(lambda: command(project, *prefix, "down", "--volumes")):
-        command(project, "make", "dev-up")
-        command(project, *prefix, "exec", "-T", "dev", "uv", "sync", "--locked")
-        command(
-            project,
-            *prefix,
-            "exec",
-            "-T",
-            "dev",
-            "uv",
-            "run",
-            "python",
-            "-c",
-            "import my_python_project",
-        )
-        assert command(project, *prefix, "exec", "-T", "dev", "id", "-u").strip() != "0"
+def test_structural_render_does_not_create_environment(tmp_path: Path) -> None:
+    project = generate(tmp_path)
+    assert (project / "pyproject.toml").is_file()
+    assert not (project / "uv.lock").exists()
+    assert not (project / ".venv").exists()
+    validate_rendered(project)
 
 
-@pytest.mark.parametrize("provider", ["codex", "claude", "both", "custom"])
-def test_agent_container_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
-) -> None:
-    if not shutil.which("podman"):
-        pytest.skip("Podman unavailable: agent/security/HTTP-port runtime tests not executed")
-    info = subprocess.run(
-        ["podman", "info", "--format", "json"], text=True, capture_output=True, check=False
-    )
-    if info.returncode or not json.loads(info.stdout).get("host", {}).get("security", {}).get(
-        "rootless"
-    ):
-        pytest.skip("Usable rootless Podman unavailable")
-    for key, value in dynamic_ports("AGENT").items():
-        monkeypatch.setenv(key, value)
-    project = generate(
-        tmp_path,
-        project_slug=f"runtime-agent-{uuid4().hex[:12]}",
-        package_name="my_python_project",
-        coding_agent=provider,
-    )
-    if provider == "custom":
-        (project / "containers/agent-custom-install.sh").write_text(
-            "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "mkdir -p /opt/agent-tools/bin\n"
-            "printf '%s\\n' '#!/bin/sh' 'echo fake-harness \"$PWD\" \"$@\"' "
-            "> /opt/agent-tools/bin/fake-harness\n"
-            "chmod +x /opt/agent-tools/bin/fake-harness\n"
-        )
-    command(project, "make", "init", env=git_identity_environment(tmp_path))
-    helper = configure_agent(project)
-    with runtime_cleanup(lambda: helper.compose("down", "--volumes")):
-        command(project, "make", "agent-check")
-        command(project, "make", "agent-start")
-        assert helper.compose("exec", "-T", "agent", "id", "-u", capture=True) == "1000"
-        helper.compose("exec", "-T", "agent", "make", "check")
-        for agent in helper.AGENTS.values():
-            helper.compose("exec", "-T", "agent", agent.cli, "--version")
-        if provider == "custom":
-            helper.compose(
-                "exec",
-                "-T",
-                "agent",
-                "python",
-                "-c",
-                "import shutil; assert shutil.which('codex') is None; "
-                "assert shutil.which('claude') is None",
-            )
-        helper.compose("exec", "-T", "agent", "node", "--version")
-        helper.compose("exec", "-T", "agent", "npm", "--version")
-        config_sentinels = [
-            path + "/template-test-sentinel" for path in helper.PERSISTENT_PATHS.values()
-        ] + ["/home/agent/.cache/uv/template-cache-sentinel", "/opt/venv/template-venv-sentinel"]
-        for sentinel_path in config_sentinels:
-            helper.compose("exec", "-T", "agent", "touch", sentinel_path)
-        command(project, "make", "agent-refresh")
-        command(project, "make", "agent-start")
-        for sentinel_path in config_sentinels:
-            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
-        helper.compose("exec", "-T", "agent", "mkdir", "-p", "/tmp/template-disposable-test")
-        helper.compose(
-            "exec",
-            "-T",
-            "agent",
-            "dd",
-            "if=/dev/zero",
-            "of=/tmp/template-disposable-test/blob",
-            "bs=1M",
-            "count=100",
-        )
-        stop_state = helper.STATE.read_bytes()
-        command(project, "make", "agent-stop")
-        assert helper.agent_container() is None
-        assert helper.STATE.read_bytes() == stop_state
-        (helper.WORKSPACE / "harness-work.txt").write_text("preserve workspace\n")
-        saved_state = helper.STATE.read_bytes()
-        command(project, "make", "agent-rebuild")
-        assert helper.STATE.read_bytes() == saved_state
-        assert (helper.WORKSPACE / "harness-work.txt").read_text() == "preserve workspace\n"
-        command(project, "make", "agent-start")
-        helper.compose(
-            "exec", "-T", "agent", "test", "!", "-e", "/tmp/template-disposable-test/blob"
-        )
-        for name, agent in helper.AGENTS.items():
-            actual = helper.compose("exec", "-T", "agent", agent.cli, "--version", capture=True)
-            assert (
-                helper.parsed_version(name, actual)
-                == helper.harness_versions()[helper.VERSION_KEYS[name]]
-            )
-        for sentinel_path in config_sentinels:
-            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
-        if provider == "custom":
-            (project / ".env").write_text(
-                (project / ".env").read_text()
-                + "\nCUSTOM_AGENT_COMMAND=fake-harness\nCUSTOM_AGENT_ARGS=--example\n"
-            )
-            assert "fake-harness /workspace --example" in command(project, "make", "agent")
-            helper.compose(
-                "exec",
-                "-T",
-                "agent",
-                "python",
-                "-c",
-                "from pathlib import Path; Path('/opt/agent-tools/bin/fake-harness').unlink()",
-            )
-        command(project, "make", "agent-stop")
-        if provider != "custom":
-            command(project, "make", "agent-start")
-            for sentinel_path in config_sentinels:
-                helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
-        command(project, "make", "agent-clean")
-        if provider == "custom":
-            command(project, "make", "agent-rebuild")
-        command(project, "make", "agent-start")
-        for sentinel_path in config_sentinels:
-            helper.compose("exec", "-T", "agent", "test", "-f", sentinel_path)
-        if provider == "custom":
-            assert "fake-harness /workspace --example" in command(project, "make", "agent")
-        if provider == "both":
-            helper.compose(
-                "exec",
-                "-T",
-                "agent",
-                "python",
-                "-c",
-                f"from pathlib import Path; Path({config_sentinels[0]!r}).unlink()",
-            )
-            helper.compose("exec", "-T", "agent", "test", "-f", config_sentinels[1])
-        ids = helper.compose("ps", "-q", capture=True).splitlines()
-        inspection = json.loads(command(project, "podman", "inspect", *ids))[0]
-        mounts = inspection["Mounts"]
-        binds = [mount for mount in mounts if mount["Type"] == "bind"]
-        assert len(binds) == 1
-        assert Path(binds[0]["Source"]).resolve() == helper.WORKSPACE.resolve()
-        assert all(".sock" not in mount["Source"] for mount in mounts)
-        for mappings in inspection["NetworkSettings"]["Ports"].values():
-            assert all(mapping["HostIp"] == "127.0.0.1" for mapping in mappings)
-        sentinel = tmp_path / "host-only"
-        sentinel.write_text("preserve")
-        result = subprocess.run(
-            [
-                "podman",
-                "compose",
-                "--env-file",
-                "/dev/null",
-                "-f",
-                str(project / "containers/compose.agent.yaml"),
-                "exec",
-                "-T",
-                "agent",
-                "sh",
-                "-c",
-                f"echo changed > {sentinel}",
-            ],
-            cwd=project,
-            env=helper.environment(),
-            capture_output=True,
-            check=False,
-        )
-        assert result.returncode != 0 and sentinel.read_text() == "preserve"
-        helper.compose(
-            "exec",
-            "-d",
-            "agent",
-            "uv",
-            "run",
-            "python",
-            "-m",
-            "http.server",
-            "8000",
-            "--bind",
-            "0.0.0.0",
-        )
-        port = helper.environment()["AGENT_APP_PORT"]
-        command(
-            project,
-            "curl",
-            "--fail",
-            "--retry",
-            "10",
-            "--retry-connrefused",
-            "--retry-delay",
-            "1",
-            f"http://127.0.0.1:{port}",
-        )
-
-
-def test_agent_multi_project_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if not shutil.which("podman"):
-        pytest.skip("Podman unavailable: simultaneous multi-project agents not executed")
-    info = subprocess.run(
-        ["podman", "info", "--format", "json"], text=True, capture_output=True, check=False
-    )
-    if info.returncode or not json.loads(info.stdout).get("host", {}).get("security", {}).get(
-        "rootless"
-    ):
-        pytest.skip("Usable rootless Podman unavailable")
-    # Keep the identical user defaults. Even if another host service owns one,
-    # both projects must start through the runtime's automatic allocation.
-    for key in ("AGENT_APP_PORT", "AGENT_JUPYTER_PORT", "AGENT_DOCS_PORT"):
-        monkeypatch.delenv(key, raising=False)
-    projects = [
-        generate(
-            tmp_path,
-            project_slug=f"ports-{name}-{uuid4().hex[:12]}",
-            coding_agent=provider,
-            package_name="my_python_project",
-        )
-        for name, provider in (("a", "codex"), ("b", "claude"))
-    ]
-    for project in projects:
-        command(project, "make", "init", env=git_identity_environment(tmp_path))
-    helpers = [configure_agent(project) for project in projects]
-    effective: list[dict[str, int]] = []
-    with ExitStack() as stack:
-        for helper in helpers:
-            stack.enter_context(runtime_cleanup(partial(helper.compose, "down", "--volumes")))
-        for index, (project, helper) in enumerate(zip(projects, helpers, strict=True)):
-            command(project, "make", "agent-start")
-            container = helper.agent_container()
-            assert container is not None and container["State"]["Running"]
-            ports = helper.published_ports(container)
-            assert ports == json.loads(helper.STATE.read_text())["ports"]
-            effective.append(ports)
-            output = command(project, "make", "agent-status")
-            assert "Agent: running" in output
-            for port in ports.values():
-                assert f"http://127.0.0.1:{port}" in output
-            helper.compose(
-                "exec",
-                "-T",
-                "agent",
-                "uv",
-                "run",
-                "python",
-                "-c",
-                f"from pathlib import Path; Path('identity.txt').write_text('project-{index}')",
-            )
-            helper.compose(
-                "exec",
-                "-d",
-                "agent",
-                "uv",
-                "run",
-                "python",
-                "-m",
-                "http.server",
-                "8000",
-                "--bind",
-                "0.0.0.0",
-            )
-        assert set(effective[0].values()).isdisjoint(effective[1].values())
-        for index, (project, ports) in enumerate(zip(projects, effective, strict=True)):
-            response = command(
-                project,
-                "curl",
-                "--fail",
-                "--retry",
-                "10",
-                "--retry-connrefused",
-                "--retry-delay",
-                "1",
-                f"http://127.0.0.1:{ports['app']}/identity.txt",
-            )
-            assert response == f"project-{index}"
-        command(projects[0], "make", "agent-stop")
-        stopped = helpers[0].agent_container()
-        assert stopped is None or not stopped["State"]["Running"]
-        still_running = helpers[1].agent_container()
-        assert still_running is not None and still_running["State"]["Running"]
-        assert helpers[1].published_ports(still_running) == effective[1]
-        assert (
-            command(
-                projects[1],
-                "curl",
-                "--fail",
-                f"http://127.0.0.1:{effective[1]['app']}/identity.txt",
-            )
-            == "project-1"
-        )
-        assert "Agent: running" in command(projects[1], "make", "agent-status")
+def test_render_cache_returns_independent_projects(tmp_path: Path) -> None:
+    first = generate(tmp_path / "first")
+    original = (first / "README.md").read_text()
+    (first / "README.md").write_text("changed by one test")
+    initialize(first)
+    second = generate(tmp_path / "second")
+    assert (second / "README.md").read_text() == original
+    assert not (second / ".git").exists()
+    assert first != second

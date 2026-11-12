@@ -560,3 +560,13 @@ including the master's reusable 106 MiB `.venv` and 6.9 MiB mypy cache created
 by tooling tests. These are not retained pytest projects. Credentials, useful
 caches, workspace and venv were not purged. The complete host Podman/WSL
 before/after-stop and actual-login checks remain manual requirements above.
+
+## Proportionate template validation
+
+`make agent-test` runs `make check`, including only the fast template suite.
+During iteration, use `make check`; before finalizing rendering changes, use
+`make test-integration`. Use `make check-full` for full template validation.
+Real engine tests are selected separately by `make test-runtime`; run these on
+a capable host for agent/container changes. Inside the sandbox they skip when
+the engine is intentionally unavailable. Never expose an engine socket to make
+these tests run. See [testing.md](testing.md) for suite boundaries and profiling.
