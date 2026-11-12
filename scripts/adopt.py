@@ -23,7 +23,36 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "{{cookiecutter.project_slug}}"
 PROFILES = ("auto", "python", "node", "mixed", "generic")
 HARNESSES = ("codex", "claude", "both", "custom", "none")
-IGNORED = {".git", ".agent", ".venv", "node_modules", ".template", "vendor", "dist", "build"}
+# Directory basenames pruned at every depth, shared by all discovery consumers.
+IGNORED = {
+    ".git",
+    ".agent",
+    ".template",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".cache",
+    "target",
+    "dist",
+    "build",
+    "coverage",
+    "htmlcov",
+    ".generated",
+    "generated",
+    "vendor",
+    "output",
+    "outputs",
+    "artifacts",
+    "snapshots",
+    "cache",
+    "tmp",
+    "temp",
+}
+ADOPTION_METADATA = ".template/adoption.json"
 PYTHON = {
     "pyproject.toml",
     "requirements.txt",
@@ -43,20 +72,76 @@ def git(repo: Path, *args: str) -> str:
     ).strip()
 
 
+def ignored_directory(relative: Path) -> bool:
+    """Ignore known dependency/output trees, keeping source configuration like .cargo."""
+    return relative.name in IGNORED or relative.parts[-2:] in {
+        (".cargo", "registry"),
+        (".cargo", "git"),
+        ("qa-assets", "baseline"),
+        ("qa-assets", "baselines"),
+    }
+
+
 def repository_files(repo: Path) -> Iterator[Path]:
     """Walk application metadata without traversing dependency trees or symlink directories."""
     for base, dirs, names in os.walk(repo, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in IGNORED and not Path(base, d).is_symlink())
+        dirs[:] = sorted(
+            d
+            for d in dirs
+            if not ignored_directory(Path(base, d).relative_to(repo))
+            and not Path(base, d).is_symlink()
+        )
         for name in sorted(names):
             yield Path(base, name).relative_to(repo)
 
 
-def audit(repo: Path) -> dict[str, Any]:
+def validate_repository(repo: Path) -> None:
     if not repo.is_dir():
         raise ValueError("Target directory does not exist.")
     if Path(git(repo, "rev-parse", "--show-toplevel")).resolve() != repo:
         raise ValueError("Target must be the Git repository root.")
     git(repo, "rev-parse", "HEAD")  # Require recoverable history, never initialize Git.
+
+
+class AdoptionMetadataError(ValueError):
+    """An existing adoption marker cannot safely establish adopted state."""
+
+
+def adoption_metadata(repo: Path) -> dict[str, Any] | None:
+    """Read the adoption marker safely, before discovery or candidate generation.
+
+    Older markers may omit provenance/profile fields. The template identity and
+    explicit adopted flag are required; optional known fields must be well typed.
+    """
+    try:
+        path = safe_path(repo, ADOPTION_METADATA)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        if data.get("adopted") is not True or data.get("template") != "python-project-template":
+            raise ValueError("missing or unrecognized template identity/adopted flag")
+        if "profile" in data and data["profile"] not in PROFILES:
+            raise ValueError("invalid profile")
+        if "coding_agent" in data and data["coding_agent"] not in HARNESSES:
+            raise ValueError("invalid coding_agent")
+        if "infrastructure_version" in data and (
+            type(data["infrastructure_version"]) is not int or data["infrastructure_version"] < 1
+        ):
+            raise ValueError("invalid infrastructure version")
+        if "template_revision" in data and not isinstance(data["template_revision"], str):
+            raise ValueError("invalid template revision")
+    except (ValueError, OSError) as exc:
+        raise AdoptionMetadataError(
+            "Adoption metadata is present but invalid. Manual review required. "
+            f"({ADOPTION_METADATA}: {exc})"
+        ) from exc
+    return data
+
+
+def audit(repo: Path) -> dict[str, Any]:
+    validate_repository(repo)
     found = []
     for path in repository_files(repo):
         if path.name in PYTHON | NODE | OTHER | {
@@ -645,7 +730,6 @@ def render_blocks(entries: list[Entry]) -> None:
         if reason == "Existing file preserved":
             reason = "path already exists with unrelated content"
         print(f"  {entry.name}\n    {reason}", file=sys.stderr)
-    print("No files modified.", file=sys.stderr)
 
 
 def render_success(repo: Path, entries: list[Entry]) -> None:
@@ -661,6 +745,26 @@ def render_success(repo: Path, entries: list[Entry]) -> None:
     print('  git commit -m "chore: adopt project template infrastructure"')
     print("\nThen:\n  make agent-check\n  make agent-start\n  make agent")
     print("Commit the reviewed infrastructure before starting the independent agent clone.")
+
+
+def render_already_adopted(repo: Path, metadata: dict[str, Any], *, preview: bool) -> None:
+    print("Repository adoption dry-run" if preview else "Repository already adopted.")
+    print(f"\nRepository:\n  {repo}")
+    print(f"\nGit:\n  branch: {git(repo, 'branch', '--show-current') or '(detached HEAD)'}")
+    print(f"  HEAD: {git(repo, 'rev-parse', '--short', 'HEAD')}")
+    print(f"  working tree: {'dirty' if git(repo, 'status', '--porcelain') else 'clean'}")
+    print(f"\nStatus:\n  already adopted\n\nAdoption metadata:\n  {ADOPTION_METADATA}")
+    for key, label in (
+        ("profile", "Profile"),
+        ("coding_agent", "Agent"),
+        ("infrastructure_version", "Infrastructure schema"),
+        ("template_revision", "Template revision"),
+    ):
+        if key in metadata:
+            print(f"{label}: {metadata[key]}")
+    print("\nThis repository already contains the template infrastructure.")
+    print("Re-adoption is not supported. Infrastructure updates are not handled by adopt.")
+    print("\nNo files modified." if preview else "\nNo changes applied.")
 
 
 def environment_flag(name: str) -> bool:
@@ -695,6 +799,11 @@ def main() -> None:
         repo = args.repo.expanduser().resolve()
         if repo == ROOT or ROOT.is_relative_to(repo) or repo.is_relative_to(ROOT):
             raise ValueError("Adoption target must be separate from the template sources.")
+        validate_repository(repo)
+        metadata = adoption_metadata(repo)
+        if metadata is not None:
+            render_already_adopted(repo, metadata, preview=preview)
+            return
         report = audit(repo)
         profile = report["profile"] if args.profile == "auto" else args.profile
         entries = plan(repo, report, profile, args.agent)
@@ -714,6 +823,7 @@ def main() -> None:
             sys.exit(1)
         if not preview and any(e.blocking for e in entries):
             render_blocks(entries)
+            print("No files modified.", file=sys.stderr)
             sys.exit(1)
         if not preview:
             applying = True
@@ -745,6 +855,11 @@ def main() -> None:
             print("No files modified.")
         else:
             render_success(repo, entries)
+    except AdoptionMetadataError as exc:
+        print(f"Adoption blocked.\n\n{exc}\nNo files modified.", file=sys.stderr)
+        if debug:
+            traceback.print_exc()
+        sys.exit(1)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         title = (
             "Adoption applied, but reporting failed"

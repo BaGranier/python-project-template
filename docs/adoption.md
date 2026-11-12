@@ -77,8 +77,8 @@ errors have no traceback by default. For unexpected failures, rerun with
 `DEBUG=1` for a traceback. Write failures report completed rollback when it was
 completed; failures during rollback remain errors requiring Git inspection.
 
-The complete candidate plan is still computed and validated in every output
-mode. Console verbosity does not change the audit, hashes, classification,
+For repositories not yet adopted, the complete candidate plan is computed and
+validated in every output mode. Console verbosity does not change the audit, hashes, classification,
 transactional guards, installed files or `.template/adoption.json` format.
 A concise default reduces terminal/CI output and agent context usage while
 keeping the result and conflicts visible. Prefer the normal dry-run during
@@ -127,13 +127,46 @@ presence does not select the application stack. Additional runtimes and package
 managers (including yarn, pnpm and bun) must be provisioned in the image if used;
 no package-manager conversion or version migration is performed.
 
-Detection searches nested manifests, excluding `.git`, `.agent`, `.venv`,
-`node_modules`, build outputs and vendor trees, without following symlink
-directories. Python package metadata and historical manager files are recognized;
-Node lockfiles, declared package manager and TypeScript configuration are
-reported. Ambiguous Node lockfiles without a declared manager yield `unknown`
-and no inferred commands. Rust, Go, Java and CMake metadata are reported while
-the profile remains `generic`. Override the proposal with `PROFILE=...`.
+Discovery scans project source/configuration rather than every file physically
+present below the repository root. A single traversal prunes excluded directories
+before descending, for manifests, CI, Docker/Compose, development containers and
+Make include analysis alike. Directory symlinks are never followed.
+
+Exclusions apply at every depth: `.git`, `.agent`, `.template`, `.venv`, `venv`,
+`node_modules`, Python/tool caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`,
+`.ruff_cache`, `.cache`), `target`, `dist`, `build`, `coverage`, `htmlcov`, `vendor`,
+`.generated`, `generated`, `output`, `outputs`, `artifacts`, `snapshots`, `cache`,
+`tmp` and `temp`. This includes `data/output` and generated QA snapshots without
+excluding all of `data/`. `qa-assets/baseline` and `qa-assets/baselines` are pruned
+specifically. These are explicit reserved directory conventions, not guesses based
+on file content; source intentionally stored under those names is not discovered.
+Caches are never deleted or modified.
+
+Only `.cargo/registry` and `.cargo/git` are excluded within `.cargo`:
+`.cargo/config.toml` remains visible to the traversal. Source Cargo manifests such
+as `apps/desktop/src-tauri/Cargo.toml` remain detected. Tracked and untracked source
+configuration are both inspected; discovery is not restricted to `git ls-files`,
+so a dirty dry-run can still see newly added source manifests. Gitignored files
+outside the explicit excluded trees can be inspected too.
+
+Python package metadata and historical manager files are recognized. Node
+lockfiles, declared package manager and TypeScript configuration are reported.
+Ambiguous Node lockfiles without a declared manager yield `unknown` and no
+inferred commands. Rust, Go, Java and CMake metadata are reported while the
+profile remains `generic`. Override the proposal with `PROFILE=...`.
+
+Before discovery, adoption validates the Git root/history and checks
+`.template/adoption.json` through the same symlink-safe destination guard.
+A valid marker has `template: "python-project-template"` and `adopted: true`;
+known optional profile, harness and provenance fields are validated if present.
+Older markers may omit these optional fields: the summary prints only known
+information and does not rescan to fill gaps. All three commands (`adopt`,
+`adopt-dry-run`, `adopt-diff`) then return exit code 0 with status `already adopted`,
+without manifest discovery, Make analysis, candidate generation or writes, even
+if the current tree is dirty. Invalid, unreadable or unsafe metadata requires
+manual review and returns a nonzero status before discovery. Metadata is never
+rewritten. Re-adoption and infrastructure updates remain separate, unsupported
+workflows. Preview footers are printed once, including when blocked.
 
 Application commands live in `.template/project.json`. For a root Node application,
 only existing lint/test/build/etc. scripts are mapped, with an install command
@@ -177,8 +210,8 @@ Cruft is not required. Adoption never creates `.cruft.json` or claims Cookiecutt
 ancestry. `.template/adoption.json` records an infrastructure schema version,
 template revision, original HEAD, detected stack and hashes of installed files.
 These support a future infrastructure-only update mechanism; this ticket does
-not implement one. Re-adoption refuses existing adoption metadata. Resolve
-conflicts manually and rerun the dry-run on a clean tree. Managed Cruft conversion,
+not implement one. Re-adoption exits early for valid adoption metadata. Resolve
+conflicts in unadopted repositories manually and rerun the dry-run on a clean tree. Managed Cruft conversion,
 CI replacement and package-manager migration are outside this workflow.
 
 Make integration also recognizes `GNUmakefile` and `makefile` in GNU Make's
@@ -205,3 +238,34 @@ regression tests also check modification timestamps. The actual user repository
 used an equivalent temporary fixture rather than claiming validation of that
 external repository. Normal-output size has a generous 200-line regression
 limit for the known fixture; blocking conflicts are never subject to that limit.
+
+## Discovery validation (TEMPLATE-015)
+
+A temporary repository equivalent to a Python/Node/Tauri monorepo retained the
+real Python manifest, both Node manifests, the Tauri Cargo manifest and GitHub
+Actions configuration. Dependency GitLab CI files and generated QA package
+snapshots did not enter discovery or the adoption plan. `.cargo/config.toml`
+remained visible. Preview commands left target contents and Git status intact.
+
+For a sample of seven traversals (median, excluding Git subprocesses and candidate
+rendering), adding 6,001 dependency/generated manifests produced:
+
+| Traversal | Time | Visible files |
+| --- | ---: | ---: |
+| Current, source fixture only | 0.72 ms | 11 |
+| Current, populated caches/outputs | 0.93 ms | 11 |
+| Previous, populated caches/outputs | 73.42 ms | 2,012 |
+
+These are diagnostic measurements, not test timing thresholds. The pruning
+regression test instruments directory descent and refuses entry into excluded
+trees containing 3,000 fake dependency manifests.
+
+The non-adopted fixture's normal dry-run printed 45 lines; after adoption its
+preview printed 24 lines with `already adopted`, no plan, no SKIP/BLOCK counts
+and one footer. Tests replace discovery, rendering and application functions
+with failure sentinels to guarantee the early exit for all three commands and
+both current and minimal legacy metadata. Invalid/unreadable metadata and
+metadata symlinks remain errors requiring manual review.
+
+The actual `~/projects/pdf-editor` was unavailable in this environment; these
+results describe the temporary equivalent, not validation of the external repo.

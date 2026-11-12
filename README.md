@@ -301,6 +301,15 @@ Choose `PROFILE=auto|python|node|mixed|generic` independently of
 application a Python project. See [the adoption workflow](docs/adoption.md) for
 merge rules, command configuration, review and limitations.
 
+Discovery ignores dependency caches, virtual environments, generated outputs and
+package registries. It scans project source/configuration rather than every file
+physically present below the repository root. Exclusions include `.git`, `.agent`,
+`.venv`, `node_modules`, `.cargo/registry`, `.cargo/git`, `target`, `dist`, `build`
+and `data/output`; `.cargo/config.toml` remains visible.
+If `.template/adoption.json` already exists and is valid, adoption exits early
+with status `already adopted` and exit code 0, without discovery or a candidate
+plan. Re-adoption and infrastructure updates are not performed by `adopt`.
+
 ### Niveaux de validation du template
 
 - `make test` : logique, rendu léger, configuration et Git sans installation applicative.

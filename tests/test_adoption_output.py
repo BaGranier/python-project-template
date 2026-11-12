@@ -233,12 +233,13 @@ def test_unexpected_errors_only_trace_in_debug(
     tmp_path: Path,
     debug: bool,
 ) -> None:
+    repo = repository(tmp_path / "unexpected", {"README.md": "existing source"})
     monkeypatch.delenv("DEBUG", raising=False)
     monkeypatch.delenv("VERBOSE", raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["adopt", "--repo", str(tmp_path), "--dry-run"] + (["--debug"] if debug else []),
+        ["adopt", "--repo", str(repo), "--dry-run"] + (["--debug"] if debug else []),
     )
 
     def fail(_: Path) -> None:
@@ -286,10 +287,10 @@ def test_already_adopted_explains_why_nothing_is_written(monorepo: Path) -> None
     )
     before = snapshot(monorepo)
     result = run(monorepo, "adopt")
-    assert result.returncode != 0
-    assert "Already adopted" in result.stderr
-    assert "Adoption blocked" in result.stderr
-    assert "No files modified." in result.stderr
+    assert result.returncode == 0
+    assert "already adopted" in result.stdout
+    assert "No changes applied." in result.stdout
+    assert "Adoption blocked" not in result.stderr
     assert snapshot(monorepo) == before
 
 
