@@ -123,9 +123,13 @@ endif
 
 PROFILE ?= auto
 AGENT ?= both
-export REPO PROFILE AGENT
-.PHONY: adopt adopt-dry-run
-adopt: ## Adopt common infrastructure into an existing clean Git repository
-	uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT"
-adopt-dry-run: ## Audit adoption and show its diff without writing files
-	uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT" --dry-run
+VERBOSE ?= 0
+DEBUG ?= 0
+export REPO PROFILE AGENT VERBOSE DEBUG
+.PHONY: adopt adopt-dry-run adopt-diff
+adopt: ## Apply adoption (VERBOSE=1 for details; DEBUG=1 for diagnostics)
+	@uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT"
+adopt-dry-run: ## Preview adoption summary without writing (VERBOSE=1; DEBUG=1)
+	@uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT" --dry-run
+adopt-diff: ## Show complete proposed adoption diff without writing
+	@uv run python scripts/adopt.py --repo "$${REPO:?Set REPO to an existing repository}" --profile "$$PROFILE" --agent "$$AGENT" --diff

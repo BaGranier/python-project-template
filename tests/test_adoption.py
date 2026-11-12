@@ -69,7 +69,8 @@ def test_profiles_preserve_history_and_application(
         str(p.relative_to(repo)): p.read_bytes() for p in (repo / ".git").rglob("*") if p.is_file()
     }
     dry = command(ROOT, "make", "adopt-dry-run", f"REPO={repo}")
-    assert f"Detected profile: {profile}" in dry
+    assert "Detected stack" in dry
+    assert f"profile: {profile}" in dry
     assert "No files modified." in dry
     assert command(repo, "git", "status", "--porcelain") == ""
     assert not (repo / ".template").exists()

@@ -26,3 +26,8 @@ engine socket to run integration tests. Runtime tests skip when the engine is
 intentionally unavailable; report those skips. See `docs/agent.md` for host
 validation and recovery. After editing shared sandbox sources, run
 `make agent-sync` and verify the generated master build files.
+
+For normal adoption validation, prefer `make adopt-dry-run REPO=...`.
+Use `VERBOSE=1` for detection details and `make adopt-diff REPO=...` for exact
+candidate review. Reserve `DEBUG=1` for diagnosing a problem; do not enable it
+automatically during normal checks.

@@ -8,8 +8,10 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import traceback
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -309,7 +311,10 @@ def plan(repo: Path, report: dict[str, Any], profile: str, harness: str) -> list
                     if not sep:
                         continue
                     if key in values and values[key] != value:
-                        blocking, reason = True, f"CONFLICT: variable {key} has a different value"
+                        blocking = True
+                        reason += ("; " if reason else "") + (
+                            f"CONFLICT {key}: existing: {values[key]}, template: {value}"
+                        )
                     elif key not in values:
                         additions.append(line)
                 candidate = (
@@ -330,7 +335,7 @@ def plan(repo: Path, report: dict[str, Any], profile: str, harness: str) -> list
                     else "Append modular includes; preserve existing targets"
                 )
                 if dynamic_make:
-                    reason = (
+                    reason = (reason + "; " if collisions else "") + (
                         "Dynamic targets or uninspected includes require manual Make integration"
                     )
             else:
@@ -440,7 +445,7 @@ def apply(repo: Path, entries: list[Entry]) -> None:
             else:
                 written.append(entry)
                 path.write_bytes(entry.after)
-    except BaseException:
+    except BaseException as exc:
         for entry in reversed(written):
             path = repo / entry.name
             if entry.before is None:
@@ -449,7 +454,222 @@ def apply(repo: Path, entries: list[Entry]) -> None:
                 path.write_bytes(entry.before)
         for directory in reversed(created_dirs):
             directory.rmdir()
+        exc.add_note("Transaction rollback completed; adoption writes were reverted.")
         raise
+
+
+LIST_LIMIT = 6
+
+
+def output_action(entry: Entry) -> str:
+    return "BLOCK" if entry.blocking else entry.action
+
+
+def render_paths(title: str, rows: list[str], *, verbose: bool = False) -> None:
+    if not rows:
+        return
+    print(title)
+    for row in rows if verbose else rows[:LIST_LIMIT]:
+        print(f"  {row}")
+    if not verbose and len(rows) > LIST_LIMIT:
+        print(f"  ... and {len(rows) - LIST_LIMIT} more (use VERBOSE=1)")
+
+
+def merge_delta(entry: Entry) -> str:
+    changes = difflib.ndiff(
+        (entry.before or b"").decode().splitlines(), (entry.after or b"").decode().splitlines()
+    )
+    added = removed = 0
+    for line in changes:
+        added += line.startswith("+ ")
+        removed += line.startswith("- ")
+    return f"+{added}" + (f"/-{removed}" if removed else "")
+
+
+def render_summary(
+    repo: Path,
+    report: dict[str, Any],
+    profile: str,
+    harness: str,
+    entries: list[Entry],
+    *,
+    head: str,
+    preview: bool,
+    verbose: bool = False,
+) -> None:
+    print("Repository adoption dry-run" if preview else "Adopting template infrastructure")
+    print(f"Repository: {repo}\n")
+    print(f"Git:\n  branch: {report['branch'] or '(detached HEAD)'}\n  HEAD: {head}")
+    state_label = "working tree" if preview else "working tree before adoption"
+    print(f"  {state_label}: {'dirty' if report['dirty'] else 'clean'}")
+    print(f"Detected stack:\n  profile: {report['profile']}")
+    if profile != report["profile"]:
+        print(f"  selected profile: {profile}")
+    for label, names in (
+        ("Python", [p for p in report["detected"] if Path(p).name in PYTHON]),
+        ("Node", [p for p in report["detected"] if Path(p).name == "package.json"]),
+    ):
+        parents = {str(Path(p).parent) for p in names}
+        detail = ", ".join(names) if len(names) <= 2 else f"{len(parents)} projects"
+        if label == "Python" and names:
+            tools = sorted(
+                {
+                    key.removeprefix("tool.")
+                    for sections in report["python_sections"].values()
+                    for key, enabled in sections.items()
+                    if key.startswith("tool.") and enabled
+                }
+            )
+            if tools:
+                detail += " (tools: " + ", ".join(tools) + ")"
+        print(f"  {label}: {detail or 'none detected'}")
+    detected = report["detected"]
+    docker = sum(Path(p).name in {"Dockerfile", "Containerfile"} for p in detected)
+    compose = sum(Path(p).name in {"compose.yaml", "docker-compose.yml"} for p in detected)
+    ci = []
+    if any(p.startswith(".github/workflows/") for p in detected):
+        ci.append("GitHub Actions")
+    if ".gitlab-ci.yml" in detected:
+        ci.append("GitLab CI")
+    dev = any(p.startswith(".devcontainer/") for p in detected)
+    print(f"Existing infrastructure: Docker: {docker}; Compose: {compose}")
+    print(f"  CI: {', '.join(ci) or 'none detected'}; Dev Container: {'yes' if dev else 'no'}")
+    print(f"Agent:\n  profile: {harness}\n")
+    print("Plan:" if preview else "Applied:")
+    for action in ("ADD", "MERGE", "REVIEW", "SKIP", "BLOCK"):
+        print(f"  {action}: {sum(output_action(e) == action for e in entries)}")
+    print()
+    for action, title in (
+        ("ADD", "ADD" if preview else "Added:"),
+        ("MERGE", "MERGE" if preview else "Merged:"),
+        ("REVIEW", "REVIEW" if preview else "Existing files preserved (REVIEW):"),
+        ("SKIP", "SKIP"),
+    ):
+        if action == "SKIP" and not verbose:
+            continue
+        rows = []
+        for entry in entries:
+            if output_action(entry) != action:
+                continue
+            suffix = f" ({merge_delta(entry)})" if action == "MERGE" else ""
+            if verbose and entry.reason:
+                suffix += f" — {entry.reason}"
+            rows.append(entry.name + suffix)
+        render_paths(title, rows, verbose=verbose)
+
+
+def render_diffs(entries: list[Entry], *, include_added: bool) -> None:
+    for entry in entries:
+        if entry.after is None or entry.action not in (
+            {"ADD", "MERGE"} if include_added else {"MERGE"}
+        ):
+            continue
+        print(
+            "".join(
+                difflib.unified_diff(
+                    (entry.before or b"").decode().splitlines(True),
+                    entry.after.decode().splitlines(True),
+                    fromfile="/dev/null" if entry.before is None else f"a/{entry.name}",
+                    tofile=f"b/{entry.name}",
+                )
+            ),
+            end="",
+        )
+
+
+def render_verbose(report: dict[str, Any], entries: list[Entry]) -> None:
+    print("\nDetection details:")
+    for name in report["detected"]:
+        print(f"  {name}")
+        if name in report["python_sections"]:
+            tools = [
+                key.removeprefix("tool.")
+                for key, enabled in report["python_sections"][name].items()
+                if key.startswith("tool.") and enabled
+            ]
+            print("    Python tools: " + (", ".join(tools) or "none detected"))
+        if name in report["node"]:
+            node = report["node"][name]
+            print(f"    package manager: {node['manager']}")
+            print(f"    TypeScript: {'yes' if node['typescript'] else 'no'}")
+            print("    Available scripts: " + (", ".join(node["scripts"]) or "none"))
+    print("Application commands:")
+    configured = next(e for e in entries if e.name == ".template/project.json")
+    assert configured.after is not None
+    commands = json.loads(configured.after)["commands"]
+    for name, steps in commands.items():
+        for step in steps:
+            print(f"  {name}: {shlex.join(step['argv'])} (cwd: {step.get('cwd', '.')})")
+    if not commands:
+        print("  none inferred; configure .template/project.json explicitly")
+
+
+def render_debug(report: dict[str, Any], entries: list[Entry]) -> None:
+    def digest(content: bytes | None) -> dict[str, Any] | None:
+        if content is None:
+            return None
+        return {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+
+    metadata = next(e for e in entries if e.name == ".template/adoption.json")
+    assert metadata.after is not None
+    diagnostics = {
+        "audit": report,
+        "candidate_plan": [
+            {
+                "path": e.name,
+                "action": e.action,
+                "blocking": e.blocking,
+                "reason": e.reason,
+                "before": digest(e.before),
+                "after": digest(e.after),
+            }
+            for e in entries
+        ],
+        "adoption_provenance": {
+            key: value
+            for key, value in json.loads(metadata.after).items()
+            if key not in {"files", "audit"}
+        },
+    }
+    print("\nDEBUG: internal adoption diagnostics")
+    print(json.dumps(diagnostics, indent=2))
+
+
+def render_blocks(entries: list[Entry]) -> None:
+    blocked = [e for e in entries if e.blocking]
+    print(
+        f"Adoption blocked.\n\n{len(blocked)} conflicts require manual resolution:", file=sys.stderr
+    )
+    for entry in blocked:  # Never truncate blockers, even if other lists are truncated.
+        reason = entry.reason
+        if reason == "Existing file preserved":
+            reason = "path already exists with unrelated content"
+        print(f"  {entry.name}\n    {reason}", file=sys.stderr)
+    print("No files modified.", file=sys.stderr)
+
+
+def render_success(repo: Path, entries: list[Entry]) -> None:
+    print("\nAdoption completed successfully.")
+    for label, actions in (
+        ("Files added", {"ADD"}),
+        ("Files modified", {"MERGE"}),
+        ("Existing files preserved", {"REVIEW", "SKIP"}),
+    ):
+        print(f"{label}: {len({e.name for e in entries if e.action in actions})}")
+    print(f"\nNext steps:\n  cd {shlex.quote(str(repo))}")
+    print("  git status --short\n  git diff\n  git add <reviewed-files>\n  git diff --cached")
+    print('  git commit -m "chore: adopt project template infrastructure"')
+    print("\nThen:\n  make agent-check\n  make agent-start\n  make agent")
+    print("Commit the reviewed infrastructure before starting the independent agent clone.")
+
+
+def environment_flag(name: str) -> bool:
+    value = os.environ.get(name, "0").strip().lower()
+    if value in {"1", "true", "yes"}:
+        return True
+    if value in {"", "0", "false", "no"}:
+        return False
+    raise ValueError(f"{name} must be 1/true/yes or 0/false/no.")
 
 
 def main() -> None:
@@ -457,64 +677,95 @@ def main() -> None:
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--profile", choices=PROFILES, default="auto")
     parser.add_argument("--agent", choices=HARNESSES, default="both")
-    parser.add_argument("--dry-run", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--dry-run", action="store_true", help="Show a concise read-only preview")
+    modes.add_argument("--diff", action="store_true", help="Show full read-only candidate diffs")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Show detailed human-readable output"
+    )
+    parser.add_argument("--debug", action="store_true", help="Include internal diagnostics")
     args = parser.parse_args()
+    debug = False
+    applying = False
+    applied = False
     try:
+        debug = args.debug or environment_flag("DEBUG")
+        verbose = args.verbose or environment_flag("VERBOSE") or debug
+        preview = args.dry_run or args.diff
         repo = args.repo.expanduser().resolve()
         if repo == ROOT or ROOT.is_relative_to(repo) or repo.is_relative_to(ROOT):
             raise ValueError("Adoption target must be separate from the template sources.")
         report = audit(repo)
         profile = report["profile"] if args.profile == "auto" else args.profile
-        print(
-            f"Repository: {repo}\n"
-            f"Git: existing repository\n"
-            f"Branch: {report['branch']}\n"
-            f"Working tree: {'dirty' if report['dirty'] else 'clean'}\n"
-            f"Detected profile: {report['profile']}\n"
-            f"Selected profile: {profile}\n"
-            f"Harness: {args.agent}"
-        )
-        print("Detected application stack:\n" + json.dumps(report, indent=2))
         entries = plan(repo, report, profile, args.agent)
-        print("Adoption plan:")
-        for action in ("ADD", "MERGE", "REVIEW", "SKIP"):
-            print("REVIEW REQUIRED" if action == "REVIEW" else action)
-            for entry in entries:
-                if entry.action == action:
-                    print(f"  {entry.name}" + (f" — {entry.reason}" if entry.reason else ""))
-        for entry in entries:
-            if entry.after is not None and entry.action in {"ADD", "MERGE"}:
-                print(
-                    "".join(
-                        difflib.unified_diff(
-                            (entry.before or b"").decode().splitlines(True),
-                            entry.after.decode().splitlines(True),
-                            fromfile=f"a/{entry.name}",
-                            tofile=f"b/{entry.name}",
-                        )
-                    ),
-                    end="",
-                )
-        if args.dry_run:
-            print("No files modified.")
-            return
-        apply(repo, entries)
-        print(
-            "Template infrastructure adopted successfully.\n"
-            "\n"
-            "Review:\n"
-            "    git status\n"
-            "    git diff\n"
-            "    git diff --no-index /dev/null <added-file>\n"
-            "\n"
-            "Then commit:\n"
-            "    git add <reviewed-files>\n"
-            '    git commit -m "chore: adopt project template infrastructure"\n'
-            "\n"
-            "Commit before make agent-start so the independent clone includes the infrastructure."
+        head = git(repo, "rev-parse", "--short", "HEAD")
+        if not preview and (report["dirty"] or any(e.blocking for e in entries)):
+            if verbose:
+                render_verbose(report, entries)
+            if debug:
+                render_debug(report, entries)
+        if not preview and report["dirty"]:
+            print(
+                "Adoption blocked.\n\nWorking tree is not clean.\n\nRun:\n"
+                "  git status --short\n\nCommit or stash the current changes, then retry.\n"
+                "No files modified.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not preview and any(e.blocking for e in entries):
+            render_blocks(entries)
+            sys.exit(1)
+        if not preview:
+            applying = True
+            apply(repo, entries)
+            applied = True
+            applying = False
+        render_summary(
+            repo, report, profile, args.agent, entries, head=head, preview=preview, verbose=verbose
         )
+        if verbose:
+            render_verbose(report, entries)
+        if debug:
+            render_debug(report, entries)
+        if preview:
+            if args.diff or verbose:
+                render_diffs(entries, include_added=args.diff)
+            print("\nResult:")
+            if any(e.blocking for e in entries):
+                print("  Adoption is blocked; resolve the infrastructure conflicts.")
+                render_blocks(entries)
+            elif report["dirty"]:
+                print("  Actual adoption requires a clean working tree.")
+            else:
+                print("  No blocking conflicts. Adoption can be applied safely.")
+                print(
+                    f"Run:\n  make adopt REPO={shlex.quote(str(repo))} "
+                    f"PROFILE={args.profile} AGENT={args.agent}"
+                )
+            print("No files modified.")
+        else:
+            render_success(repo, entries)
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
-        sys.exit(str(exc))
+        title = (
+            "Adoption applied, but reporting failed"
+            if applied
+            else "Adoption failed during write or rollback"
+            if applying
+            else "Adoption not applied"
+        )
+        print(f"{title}: {exc}", file=sys.stderr)
+        for note in getattr(exc, "__notes__", []):
+            print(note, file=sys.stderr)
+        print("Re-run with DEBUG=1 for diagnostics.", file=sys.stderr)
+        if debug:
+            traceback.print_exc()
+        sys.exit(1)
+    except Exception as exc:
+        title = "Adoption applied, but reporting failed" if applied else "Adoption failed"
+        print(f"{title}: {exc}\nRe-run with DEBUG=1 for diagnostics.", file=sys.stderr)
+        if debug:
+            traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

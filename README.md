@@ -290,7 +290,8 @@ To add the sandbox infrastructure to an existing Git repository without replacin
 its history or application files:
 
 ```bash
-make adopt-dry-run REPO=~/projects/existing-repo
+make adopt-dry-run REPO=~/projects/existing-repo  # concise, read-only summary
+make adopt-diff REPO=~/projects/existing-repo     # complete candidate diffs
 make adopt REPO=~/projects/existing-repo
 ```
 
@@ -312,3 +313,8 @@ merge rules, command configuration, review and limitations.
 Les targets du maître concernent le générateur ; les commandes de validation des
 applications générées conservent leur comportement. Voir [le guide de tests](docs/testing.md)
 et [les mesures avant/après](docs/test-performance.md).
+
+For detailed adoption detection and all path lists, add `VERBOSE=1`; for internal
+diagnostics, add `DEBUG=1`. Both default to `0`. Normal adoption output omits raw
+internal JSON and full candidate payloads; `adopt-diff` provides those file diffs
+explicitly without modifying the target repository.
