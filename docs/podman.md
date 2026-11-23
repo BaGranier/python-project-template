@@ -15,6 +15,7 @@ On Ubuntu/Debian with the packages available in the distribution repositories:
 sudo apt update
 sudo apt install -y \
     podman \
+    podman-compose \
     uidmap \
     fuse-overlayfs \
     passt
@@ -252,6 +253,23 @@ legitimately own this port. Runtime tests must still pass with it running.
 References: [rootless tutorial](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md),
 [socket service](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html),
 [Compose providers](https://docs.podman.io/en/latest/markdown/podman-compose.1.html).
+
+### Agent Compose issues
+
+The agent requires `/usr/bin/podman-compose`. If `podman compose` selects the
+Windows Docker Desktop provider instead, verify that `podman-compose` is installed:
+
+    command -v podman-compose
+
+With `userns_mode: keep-id`, the agent Compose file must also disable Podman's
+automatic pod creation:
+
+    x-podman:
+      in_pod: false
+
+Otherwise recent Podman/podman-compose versions may fail with:
+
+    Error: --userns and --pod cannot be set together
 
 
 ## Disk usage and cleanup
